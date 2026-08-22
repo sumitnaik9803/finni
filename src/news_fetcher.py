@@ -24,7 +24,9 @@ from urllib.parse import quote_plus
 
 import aiohttp
 import feedparser
+from bs4 import BeautifulSoup
 from dateutil import parser as date_parser
+from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
 from src.config import (
     COMPANIES,
@@ -66,7 +68,10 @@ class NewsFetcher:
 
     def __init__(self, news_window_hours: int = NEWS_WINDOW_HOURS):
         self.news_window_hours = news_window_hours
-        self.cutoff_time = datetime.now(timezone.utc) - timedelta(hours=news_window_hours)
+        # Determine window based on day of week (Monday = 66 hours to cover weekend)
+        now = datetime.now(timezone.utc)
+        hours = 66 if now.weekday() == 0 else NEWS_WINDOW_HOURS
+        self.cutoff_time = now - timedelta(hours=hours)
 
     async def fetch_all(self, companies: list[CompanyConfig] | None = None) -> dict[str, list[NewsArticle]]:
         """
@@ -123,19 +128,20 @@ class NewsFetcher:
 
         return mapped
 
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=2, max=10),
+        retry=retry_if_exception_type(Exception),
+        reraise=True
+    )
     async def _fetch_rss_feed(
         self, session: aiohttp.ClientSession, source: NewsSourceConfig
     ) -> list[NewsArticle]:
-        """Fetch and parse a single RSS feed."""
-        try:
-            async with session.get(source.url) as resp:
-                if resp.status != 200:
-                    logger.warning(f"HTTP {resp.status} from {source.name}: {source.url}")
-                    return []
-                content = await resp.text()
-        except Exception as e:
-            logger.warning(f"Failed to fetch {source.name}: {e}")
-            return []
+        """Fetch and parse a single RSS feed with retry logic."""
+        async with session.get(source.url) as resp:
+            if resp.status != 200:
+                raise Exception(f"HTTP {resp.status} from {source.name}: {source.url}")
+            content = await resp.text()
 
         feed = feedparser.parse(content)
         articles = []
@@ -143,33 +149,64 @@ class NewsFetcher:
         for entry in feed.entries:
             article = self._parse_entry(entry, source.name, source.tier)
             if article and article.published_at >= self.cutoff_time:
+                # Enrich summary if it is thin (< 50 chars)
+                if len(article.summary) < 50:
+                    try:
+                        desc = await self._fetch_og_description(session, article.url)
+                        if desc:
+                            article.summary = desc
+                    except Exception as e:
+                        logger.debug(f"Failed to fetch og:description for {article.url}: {e}")
                 articles.append(article)
 
         logger.debug(f"  {source.name}: {len(articles)} articles within window")
         return articles
 
+    async def _fetch_og_description(self, session: aiohttp.ClientSession, url: str) -> str | None:
+        """Fetch the OpenGraph description directly from an article's webpage."""
+        async with session.get(url, timeout=10) as resp:
+            if resp.status == 200:
+                html = await resp.text()
+                soup = BeautifulSoup(html, "html.parser")
+                meta = soup.find("meta", property="og:description")
+                if meta and meta.get("content"):
+                    return meta.get("content").strip()
+        return None
+
     async def _fetch_google_news(
         self, session: aiohttp.ClientSession, company: CompanyConfig
     ) -> list[NewsArticle]:
-        """Fetch Google News RSS for a specific company."""
-        query = quote_plus(f"{company.short_name} {company.ticker.replace('.NS', '')}")
-        url = GOOGLE_NEWS_RSS_TEMPLATE.format(query=query)
+        """Fetch Google News RSS for a specific company using multiple varied queries."""
+        # Fire 3 separate queries per company to maximize coverage
+        queries = [
+            f'"{company.short_name}"',
+            f'"{company.short_name}" results',
+            f'"{company.short_name}" share'
+        ]
+        
+        tasks = []
+        for q in queries:
+            query_url = quote_plus(q)
+            url = GOOGLE_NEWS_RSS_TEMPLATE.format(query=query_url)
+            source_config = NewsSourceConfig(
+                name=f"Google News ({company.short_name})",
+                url=url,
+                tier=2,
+                category="company_specific",
+            )
+            # Use gather but catch exceptions so one query failing doesn't kill the others
+            tasks.append(self._fetch_rss_feed(session, source_config))
 
-        source_config = NewsSourceConfig(
-            name=f"Google News ({company.short_name})",
-            url=url,
-            tier=2,
-            category="company_specific",
-        )
-
-        articles = await self._fetch_rss_feed(session, source_config)
-
-        # Pre-tag these articles with the company ticker since they're from a
-        # company-specific search
-        for article in articles:
-            if company.ticker not in article.matched_tickers:
-                article.matched_tickers.append(company.ticker)
-
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        
+        articles = []
+        for result in results:
+            if not isinstance(result, Exception):
+                articles.extend(result)
+        
+        # Do NOT pre-tag articles with `matched_tickers` here. They must pass the 
+        # standard strict keyword validation in `_map_to_companies` just like ET/Mint feeds
+        # to prevent Google's semantic search (e.g. Bitcoin) from causing false positives.
         return articles
 
     def _parse_entry(self, entry: dict, source_name: str, source_tier: int) -> NewsArticle | None:

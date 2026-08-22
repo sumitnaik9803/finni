@@ -102,7 +102,7 @@ COMPANIES: list[CompanyConfig] = [
         sector="Consumer Discretionary",
         sub_sector="Gems, Jewellery & Watches",
         keywords=[
-            "titan", "titan company", "titan share", "tanishq",
+            "titan company", "titan share", "titan stock", "tanishq",
             "titan eye", "titan watches", "titan results",
         ],
         peers=["ITC.NS"],
@@ -174,12 +174,30 @@ NEWS_SOURCES: list[NewsSourceConfig] = [
         tier=1,
         category="general_market",
     ),
+    NewsSourceConfig(
+        name="Moneycontrol Top News",
+        url="https://www.moneycontrol.com/rss/MCtopnews.xml",
+        tier=1,
+        category="general_market",
+    ),
+    NewsSourceConfig(
+        name="Moneycontrol Business",
+        url="https://www.moneycontrol.com/rss/business.xml",
+        tier=1,
+        category="general_market",
+    ),
+    NewsSourceConfig(
+        name="Economic Times IT",
+        url="https://economictimes.indiatimes.com/tech/software/rssfeeds/13357555.cms",
+        tier=2,
+        category="general_market",
+    ),
 ]
 
 # Google News RSS template for company-specific searches
 GOOGLE_NEWS_RSS_TEMPLATE = (
     "https://news.google.com/rss/search?"
-    "q={query}+stock+India&hl=en-IN&gl=IN&ceid=IN:en"
+    "q={query}&hl=en-IN&gl=IN&ceid=IN:en"
 )
 
 

@@ -97,8 +97,17 @@ CONTEXT:
 - Peer companies in our watchlist: {peers}
 - Current date: {current_date}
 
-Respond ONLY with valid JSON (no markdown fences, no extra text):
-{{"sentiment_score": <float from -1.0 to +1.0>, "sentiment_label": "<VERY_BEARISH|BEARISH|NEUTRAL|BULLISH|VERY_BULLISH>", "confidence": <float 0.0 to 1.0>, "impact_magnitude": "<HIGH|MEDIUM|LOW>", "reasoning": "<1-2 sentence explanation>", "sector_spillover": <null or "brief note">, "affected_tickers": [<list of tickers from watchlist>], "event_type": "<EARNINGS|REGULATORY|MACRO|PRODUCT|MANAGEMENT|LEGAL|SECTOR_TREND|MARKET_SENTIMENT|OTHER>"}}"""
+Respond ONLY with valid JSON format (no markdown fences, no extra text):
+{{"sentiment_score": <float from -1.0 to +1.0>, "sentiment_label": "<VERY_BEARISH|BEARISH|NEUTRAL|BULLISH|VERY_BULLISH>", "confidence": <float 0.0 to 1.0>, "impact_magnitude": "<HIGH|MEDIUM|LOW>", "reasoning": "<1-2 sentence explanation>", "sector_spillover": <null or "brief note">, "affected_tickers": [<list of tickers from watchlist>], "event_type": "<EARNINGS|REGULATORY|MACRO|PRODUCT|MANAGEMENT|LEGAL|SECTOR_TREND|MARKET_SENTIMENT|OTHER>"}}
+
+CALIBRATION ANCHORS:
+- +1.0: Massive positive catalyst (huge earnings beat, major contract win)
+- +0.5: Positive news (upgrade, solid product launch, good quarter)
+- +0.1: Mildly positive, routine positive mention
+-  0.0: Factual, purely macro without specific company impact, or unrelated
+- -0.5: Negative news (downgrade, earnings miss, executive exit)
+- -1.0: Major crisis (fraud, massive lawsuit, bankruptcy risk)
+"""
 
 
 class LLMScorer:
@@ -167,20 +176,26 @@ class LLMScorer:
             try:
                 await self.groq_limiter.acquire()
                 response_text = await self._call_groq(prompt)
-                parsed = self._parse_response(response_text)
-                return self._build_result(parsed, article, provider="groq")
+                try:
+                    parsed = self._parse_response(response_text)
+                    return self._build_result(parsed, article, provider="groq")
+                except Exception as e:
+                    logger.warning(f"Groq parsing failed: {e}. Raw response: {response_text[:300]}")
             except Exception as e:
-                logger.warning(f"Groq scoring failed: {e} — falling back to Gemini")
+                logger.warning(f"Groq API call failed: {e} — falling back to Gemini")
 
         # Fallback to Gemini
         if self._gemini_available:
             try:
                 await self.gemini_limiter.acquire()
                 response_text = await self._call_gemini(prompt)
-                parsed = self._parse_response(response_text)
-                return self._build_result(parsed, article, provider="gemini")
+                try:
+                    parsed = self._parse_response(response_text)
+                    return self._build_result(parsed, article, provider="gemini")
+                except Exception as e:
+                    logger.error(f"Gemini parsing failed: {e}. Raw response: {response_text[:300]}")
             except Exception as e:
-                logger.error(f"Gemini scoring also failed: {e}")
+                logger.error(f"Gemini API call failed: {e}")
 
         # Both failed — return neutral fallback
         logger.error(f"All LLM providers failed for: {article.title[:60]}")
@@ -292,9 +307,9 @@ class LLMScorer:
             article_url=article.url,
             article_source=article.source,
             article_published_at=article.published_at,
-            sentiment_score=self._clamp(float(parsed.get("sentiment_score", 0.0)), -1.0, 1.0),
+            sentiment_score=self._clamp(float(parsed.get("sentiment_score") or 0.0), -1.0, 1.0),
             sentiment_label=parsed.get("sentiment_label", "NEUTRAL"),
-            confidence=self._clamp(float(parsed.get("confidence", 0.5)), 0.0, 1.0),
+            confidence=self._clamp(float(parsed.get("confidence") or 0.5), 0.0, 1.0),
             impact_magnitude=parsed.get("impact_magnitude", "MEDIUM"),
             reasoning=parsed.get("reasoning", "No reasoning provided."),
             sector_spillover=parsed.get("sector_spillover"),
