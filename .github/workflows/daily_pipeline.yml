@@ -37,10 +37,13 @@ jobs:
           GOOGLE_SHEET_ID: ${{ secrets.GOOGLE_SHEET_ID }}
         run: python -m src.main
 
+      - name: 🔄 Sync with remote to avoid race conditions
+        run: git pull --rebase origin main || true
+
       - name: 📊 Commit daily report
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
           commit_message: "📊 Finni daily report — ${{ github.run_id }}"
-          file_pattern: 'data/reports/*.md'
+          file_pattern: 'data/reports/*'
           commit_user_name: 'Finni Bot'
           commit_user_email: 'finni-bot@users.noreply.github.com'
