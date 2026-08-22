@@ -177,11 +177,12 @@ class NewsFetcher:
         self, session: aiohttp.ClientSession, company: CompanyConfig
     ) -> list[NewsArticle]:
         """Fetch Google News RSS for a specific company using multiple varied queries."""
-        # Fire 3 separate queries per company to maximize coverage
+        # Fire separate queries per company to maximize coverage
         queries = [
             f'"{company.short_name}"',
             f'"{company.short_name}" results',
-            f'"{company.short_name}" share'
+            f'"{company.short_name}" share',
+            f'{company.short_name} stock India' # Unquoted broad fallback
         ]
         
         tasks = []
