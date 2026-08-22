@@ -1,0 +1,46 @@
+name: Finni Daily Pipeline
+
+on:
+  schedule:
+    # 6:45 AM IST = 1:15 AM UTC (15-min buffer for runner startup delays)
+    # Runs Mon-Fri only (weekdays — Indian stock market is closed Sat/Sun)
+    - cron: '15 1 * * 1-5'
+  workflow_dispatch:
+    # Allows manual triggering from the Actions tab for testing
+
+permissions:
+  contents: write   # Required to commit report files back to the repo
+
+jobs:
+  run-pipeline:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45   # Hard cutoff to prevent runaway jobs
+
+    steps:
+      - name: 📥 Checkout repository
+        uses: actions/checkout@v4
+
+      - name: 🐍 Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: 📦 Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: 🚀 Run Finni pipeline
+        env:
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GOOGLE_SHEETS_CREDENTIALS: ${{ secrets.GOOGLE_SHEETS_CREDENTIALS }}
+          GOOGLE_SHEET_ID: ${{ secrets.GOOGLE_SHEET_ID }}
+        run: python -m src.main
+
+      - name: 📊 Commit daily report
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "📊 Finni daily report — ${{ github.run_id }}"
+          file_pattern: 'data/reports/*.md'
+          commit_user_name: 'Finni Bot'
+          commit_user_email: 'finni-bot@users.noreply.github.com'

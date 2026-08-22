@@ -1,0 +1,20 @@
+# News fetching & parsing
+feedparser>=6.0
+aiohttp>=3.9
+beautifulsoup4>=4.12
+
+# LLM API clients
+groq>=0.9
+google-genai>=1.0
+
+# Price data & technical analysis
+yfinance>=0.2.30
+pandas>=2.1
+pandas-ta>=0.3
+
+# Google Sheets publishing
+gspread>=6.0
+
+# Date parsing & utilities
+python-dateutil>=2.8
+tenacity>=8.2
