@@ -27,6 +27,7 @@ from src.aggregator import Aggregator
 from src.config import COMPANIES, get_company
 from src.llm_scorer import LLMScorer
 from src.news_fetcher import NewsFetcher
+from src.pattern_analyzer import PatternAnalyzer
 from src.report_builder import ReportBuilder
 from src.sheets_publisher import SheetsPublisher
 from src.signal_generator import SignalGenerator
@@ -142,20 +143,26 @@ async def run_pipeline():
         )
 
     # ──────────────────────────────────────────
-    # Step 7: Build report
+    # Step 7: 14-Day Sector Pattern Analysis
     # ──────────────────────────────────────────
-    logger.info("📝 Step 7/8: Building report...")
+    logger.info("🧠 Step 7/9: Analyzing 14-day sector patterns...")
+    pattern_analyzer = PatternAnalyzer()
+    patterns = await pattern_analyzer.analyze_patterns()
+
+    # ──────────────────────────────────────────
+    # Step 8: Build report
+    # ──────────────────────────────────────────
+    logger.info("📝 Step 8/9: Building report...")
     builder = ReportBuilder()
-    report = builder.build(analysis, digests, snapshots, pipeline_start_time=start_time)
+    report = builder.build(analysis, digests, snapshots, patterns, pipeline_start_time=start_time)
 
-    # Save Markdown report to disk
-    builder.save_markdown(report)
-    logger.info(f"📝 Markdown report saved for {report['date']}")
+    # Save Markdown report and JSON data to disk
+    builder.save_reports(report)
 
     # ──────────────────────────────────────────
-    # Step 8: Publish to Google Sheets
+    # Step 9: Publish to Google Sheets
     # ──────────────────────────────────────────
-    logger.info("📊 Step 8/8: Publishing to Google Sheets...")
+    logger.info("📊 Step 9/9: Publishing to Google Sheets...")
     try:
         publisher = SheetsPublisher()
         publisher.publish_daily(report)

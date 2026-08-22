@@ -7,12 +7,14 @@ Produces:
 2. A structured dict ready for the SheetsPublisher
 """
 
+import json
 import logging
 import os
 from datetime import date, datetime, timedelta, timezone
 
 from src.aggregator import DailyDigest
 from src.config import REPORTS_DIR, TICKER_TO_COMPANY
+from src.pattern_analyzer import SectorPattern
 from src.signal_generator import ComparativeAnalysis, StockSignal
 from src.technicals import TechnicalSnapshot
 
@@ -29,6 +31,7 @@ class ReportBuilder:
         analysis: ComparativeAnalysis,
         digests: dict[str, DailyDigest],
         snapshots: dict[str, TechnicalSnapshot],
+        patterns: dict[str, SectorPattern],
         pipeline_start_time: float | None = None,
     ) -> dict:
         """
@@ -54,7 +57,7 @@ class ReportBuilder:
             runtime_str = "N/A"
 
         # Build Markdown
-        md = self._build_markdown(analysis, digests, snapshots, report_date, timestamp, runtime_str)
+        md = self._build_markdown(analysis, digests, snapshots, patterns, report_date, timestamp, runtime_str)
 
         # Build Sheets data
         sheets_rows = self._build_sheets_rows(analysis, digests, snapshots, report_date)
@@ -67,19 +70,29 @@ class ReportBuilder:
             "date": report_date,
         }
 
-    def save_markdown(self, report: dict):
-        """Save the Markdown report to the data/reports/ directory."""
+    def save_reports(self, report: dict):
+        """Save the Markdown report and JSON data to the data/reports/ directory."""
         os.makedirs(REPORTS_DIR, exist_ok=True)
-        filepath = os.path.join(REPORTS_DIR, f"{report['date']}.md")
-        with open(filepath, "w", encoding="utf-8") as f:
+        
+        # Save Markdown
+        md_filepath = os.path.join(REPORTS_DIR, f"{report['date']}.md")
+        with open(md_filepath, "w", encoding="utf-8") as f:
             f.write(report["markdown"])
-        logger.info(f"Markdown report saved to {filepath}")
+            
+        # Save JSON (for historical pattern analysis)
+        json_filepath = os.path.join(REPORTS_DIR, f"{report['date']}_data.json")
+        with open(json_filepath, "w", encoding="utf-8") as f:
+            data_to_save = {k: v for k, v in report.items() if k != "markdown"}
+            json.dump(data_to_save, f, indent=2)
+            
+        logger.info(f"Reports (MD/JSON) saved for {report['date']}")
 
     def _build_markdown(
         self,
         analysis: ComparativeAnalysis,
         digests: dict[str, DailyDigest],
         snapshots: dict[str, TechnicalSnapshot],
+        patterns: dict[str, SectorPattern],
         report_date: str,
         timestamp: str,
         runtime_str: str,
@@ -94,6 +107,17 @@ class ReportBuilder:
         lines.append("> Signals are rule-based heuristics from public news sentiment and basic technical indicators.")
         lines.append(f"> Generated at {timestamp} | Pipeline runtime: {runtime_str}")
         lines.append("")
+
+        # ── Sector Patterns (14-Day) ──
+        if patterns:
+            lines.append("## 📈 14-Day Sector Patterns")
+            lines.append("")
+            for sector, pattern in patterns.items():
+                lines.append(f"### {sector}")
+                lines.append(f"- **Trend**: {pattern.trend}")
+                lines.append(f"- **Conviction Signal**: {pattern.conviction_signal}")
+                lines.append(f"- **Narrative**: {pattern.pattern}")
+                lines.append("")
 
         # ── Ranking Table ──
         lines.append("## 🏆 Today's Ranking")
