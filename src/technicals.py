@@ -102,9 +102,19 @@ class TechnicalAnalyzer:
         close = df["Close"].squeeze()
         volume = df["Volume"].squeeze() if "Volume" in df.columns else pd.Series(dtype=float)
 
+        # Drop NaN values (yfinance can return NaN for the last row on some tickers/days)
+        close = close.dropna()
+        if len(close) < 50:
+            logger.warning(f"Insufficient non-NaN close data for {ticker}: {len(close)} rows")
+            return self._empty_snapshot(ticker)
+
         # ── Price basics ──
+        import math
         last_close = float(close.iloc[-1])
         prev_close = float(close.iloc[-2]) if len(close) >= 2 else last_close
+        if math.isnan(last_close) or math.isnan(prev_close):
+            logger.warning(f"NaN price data for {ticker}, returning empty snapshot")
+            return self._empty_snapshot(ticker)
         day_change_pct = ((last_close - prev_close) / prev_close * 100) if prev_close != 0 else 0.0
 
         # ── RSI (14-day) ──

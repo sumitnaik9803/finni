@@ -16,6 +16,7 @@ Design choices:
 
 import asyncio
 import logging
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from difflib import SequenceMatcher
@@ -286,9 +287,20 @@ class NewsFetcher:
                         result[company.ticker].append(article)
                     continue
 
-                # Keyword matching
+                # Keyword matching — use word-boundary regex for short keywords
+                # to prevent false positives (e.g., 'itc' matching 'critical')
                 for keyword in company.keywords:
-                    if keyword.lower() in searchable:
+                    kw = keyword.lower()
+                    if len(kw) <= 4:
+                        # Short keywords need word-boundary matching
+                        if re.search(r'\b' + re.escape(kw) + r'\b', searchable):
+                            matched = True
+                        else:
+                            matched = False
+                    else:
+                        matched = kw in searchable
+
+                    if matched:
                         if company.ticker not in article.matched_tickers:
                             article.matched_tickers.append(company.ticker)
                         if article not in result[company.ticker]:
