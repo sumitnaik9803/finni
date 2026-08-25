@@ -341,12 +341,20 @@ class NewsFetcher:
                     else:
                         matched = kw in searchable
 
-                    if matched:
+                if matched:
                         if company.ticker not in article.matched_tickers:
                             article.matched_tickers.append(company.ticker)
                         if article not in result[company.ticker]:
                             result[company.ticker].append(article)
                         break  # One keyword match is enough for this company
+
+        # Limit to the 4 most recent articles per company to avoid LLM rate limits
+        for ticker in result:
+            articles_list = result[ticker]
+            if len(articles_list) > 4:
+                # Sort by published_at descending and keep the top 4
+                articles_list.sort(key=lambda x: x.published_at, reverse=True)
+                result[ticker] = articles_list[:4]
 
         return result
 
