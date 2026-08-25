@@ -609,7 +609,7 @@ VOLUME_RATIO_NOTABLE = 1.5
 # Groq (primary)
 GROQ_MODEL = "qwen/qwen3.6-27b"
 GROQ_MAX_RPM = 25                  # Stay under 30 RPM limit with headroom
-GROQ_MAX_TOKENS = 500              # Max response tokens per call
+GROQ_MAX_TOKENS = 4096             # High limit required for reasoning models (<think> tags)
 GROQ_TEMPERATURE = 0.1             # Low temp for consistent structured output
 
 # Gemini (fallback)
