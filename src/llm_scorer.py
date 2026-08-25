@@ -250,25 +250,31 @@ class LLMScorer:
         return response.choices[0].message.content
 
     async def _call_gemini(self, prompt: str) -> str:
-        """Call Gemini API."""
-        client = self._get_gemini_model()
-        if client is None:
-            raise RuntimeError("Gemini client not available")
-
-        loop = asyncio.get_event_loop()
-        response = await loop.run_in_executor(
-            None,
-            lambda: client.models.generate_content(
-                model=GEMINI_MODEL,
-                contents=prompt,
-                config={
-                    "temperature": GEMINI_TEMPERATURE,
-                    "max_output_tokens": GEMINI_MAX_TOKENS,
-                    "response_mime_type": "application/json",
-                },
-            ),
-        )
-        return response.text
+        """Call Gemini API via REST to bypass SDK API key format bugs."""
+        api_key = get_gemini_api_key()
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={api_key}"
+        
+        payload = {
+            "contents": [{"parts": [{"text": prompt}]}],
+            "generationConfig": {
+                "temperature": GEMINI_TEMPERATURE,
+                "maxOutputTokens": GEMINI_MAX_TOKENS,
+                "responseMimeType": "application/json"
+            }
+        }
+        
+        import aiohttp
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, json=payload) as response:
+                if response.status != 200:
+                    error_text = await response.text()
+                    raise RuntimeError(f"Gemini REST API failed ({response.status}): {error_text}")
+                data = await response.json()
+                
+        try:
+            return data["candidates"][0]["content"]["parts"][0]["text"]
+        except (KeyError, IndexError) as e:
+            raise ValueError(f"Malformed Gemini response: {data}") from e
 
     def _parse_response(self, response_text: str) -> dict:
         """
