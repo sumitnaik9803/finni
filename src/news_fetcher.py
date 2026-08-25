@@ -87,7 +87,7 @@ class NewsFetcher:
 
         async with aiohttp.ClientSession(
             timeout=aiohttp.ClientTimeout(total=30),
-            headers={"User-Agent": "Finni-StockBot/1.0 (RSS Reader)"},
+            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"},
         ) as session:
             # 1. Fetch all general market RSS feeds concurrently
             general_tasks = [
