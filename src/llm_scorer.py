@@ -252,7 +252,7 @@ class LLMScorer:
     async def _call_gemini(self, prompt: str) -> str:
         """Call Gemini API via REST to bypass SDK API key format bugs."""
         api_key = get_gemini_api_key()
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={api_key}"
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
         
         payload = {
             "contents": [{"parts": [{"text": prompt}]}],
@@ -263,9 +263,14 @@ class LLMScorer:
             }
         }
         
+        headers = {
+            "x-goog-api-key": api_key,
+            "Content-Type": "application/json"
+        }
+        
         import aiohttp
         async with aiohttp.ClientSession() as session:
-            async with session.post(url, json=payload) as response:
+            async with session.post(url, headers=headers, json=payload) as response:
                 if response.status != 200:
                     error_text = await response.text()
                     raise RuntimeError(f"Gemini REST API failed ({response.status}): {error_text}")

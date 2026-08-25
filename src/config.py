@@ -607,7 +607,7 @@ VOLUME_RATIO_NOTABLE = 1.5
 # ──────────────────────────────────────────────
 
 # Groq (primary)
-GROQ_MODEL = "llama3-8b-8192"
+GROQ_MODEL = "mixtral-8x7b-32768"
 GROQ_MAX_RPM = 25                  # Stay under 30 RPM limit with headroom
 GROQ_MAX_TOKENS = 500              # Max response tokens per call
 GROQ_TEMPERATURE = 0.1             # Low temp for consistent structured output
