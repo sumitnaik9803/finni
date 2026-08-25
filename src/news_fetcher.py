@@ -141,7 +141,10 @@ class NewsFetcher:
         async with session.get(source.url) as resp:
             if resp.status != 200:
                 raise Exception(f"HTTP {resp.status} from {source.name}: {source.url}")
-            content = await resp.text()
+            
+            # Read bytes directly and decode manually to handle bad characters (like Windows-1252 smart quotes)
+            raw_bytes = await resp.read()
+            content = raw_bytes.decode('utf-8', errors='replace')
 
         feed = feedparser.parse(content)
         articles = []
