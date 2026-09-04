@@ -29,6 +29,8 @@ from src.config import (
     GROQ_MAX_RPM,
     GROQ_MAX_TOKENS,
     GROQ_MODEL,
+    GROQ_REASONING_EFFORT,
+    GROQ_REASONING_FORMAT,
     GROQ_TEMPERATURE,
     GEMINI_MAX_RPM,
     GEMINI_MAX_TOKENS,
@@ -244,6 +246,8 @@ class LLMScorer:
                 ],
                 temperature=GROQ_TEMPERATURE,
                 max_tokens=GROQ_MAX_TOKENS,
+                reasoning_effort=GROQ_REASONING_EFFORT,
+                reasoning_format=GROQ_REASONING_FORMAT,
             ),
         )
         return response.choices[0].message.content

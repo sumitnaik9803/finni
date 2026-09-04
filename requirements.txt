@@ -11,6 +11,8 @@ google-genai>=1.0
 yfinance>=0.2.30
 pandas>=2.1
 pandas-ta>=0.3
+nselib>=2.5
+jugaad-data>=0.35
 
 # Google Sheets publishing
 gspread>=6.0

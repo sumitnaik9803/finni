@@ -9,15 +9,18 @@ Indicators: RSI(14), SMA(20/50/200), MACD(12,26,9), ATR(14), Volume ratio.
 
 import logging
 from dataclasses import dataclass
+from datetime import date, timedelta
 
 import pandas as pd
 import pandas_ta as ta
 import yfinance as yf
 
 from src.config import (
+    NSE_FALLBACK_CHUNK_DAYS,
     RSI_OVERBOUGHT,
     RSI_OVERSOLD,
     TECHNICAL_INTERVAL,
+    TECHNICAL_LOOKBACK_DAYS,
     TECHNICAL_LOOKBACK_PERIOD,
     VOLUME_RATIO_NOTABLE,
 )
@@ -60,14 +63,46 @@ class TechnicalAnalyzer:
         """
         Fetch historical data and compute all technical indicators.
 
+        Tries three providers in order — yfinance, then jugaad-data, then nselib —
+        since all three occasionally get blocked or return empty data (Yahoo Finance
+        outages, NSE rate-limiting cloud/datacenter IPs like GitHub Actions runners).
+
         Args:
-            ticker: yfinance ticker symbol (e.g., "RELIANCE.NS")
+            ticker: yfinance-style ticker symbol (e.g., "RELIANCE.NS")
 
         Returns:
             TechnicalSnapshot with all indicators computed
         """
         logger.info(f"Fetching technical data for {ticker}")
 
+        df = self._fetch_yfinance(ticker)
+        source = "yfinance"
+
+        if df is None:
+            df = self._fetch_jugaad(ticker)
+            source = "jugaad-data"
+
+        if df is None:
+            df = self._fetch_nselib(ticker)
+            source = "nselib"
+
+        if df is None or df.empty or len(df) < 50:
+            logger.warning(
+                f"No usable price data for {ticker} from any provider "
+                f"(yfinance, jugaad-data, nselib all failed or returned <50 rows)"
+            )
+            return self._empty_snapshot(ticker)
+
+        logger.info(f"  {ticker}: using {source} ({len(df)} rows)")
+
+        try:
+            return self._compute_indicators(ticker, df)
+        except Exception as e:
+            logger.error(f"Indicator computation failed for {ticker} (source={source}): {e}")
+            return self._empty_snapshot(ticker)
+
+    def _fetch_yfinance(self, ticker: str) -> pd.DataFrame | None:
+        """Primary source: Yahoo Finance via yfinance. Returns None on any failure."""
         try:
             df = yf.download(
                 ticker,
@@ -77,12 +112,12 @@ class TechnicalAnalyzer:
                 auto_adjust=True,
             )
         except Exception as e:
-            logger.error(f"yfinance download failed for {ticker}: {e}")
-            return self._empty_snapshot(ticker)
+            logger.warning(f"yfinance download failed for {ticker}: {e}")
+            return None
 
         if df is None or df.empty or len(df) < 50:
-            logger.warning(f"Insufficient data for {ticker}: {len(df) if df is not None else 0} rows")
-            return self._empty_snapshot(ticker)
+            logger.warning(f"Insufficient yfinance data for {ticker}: {len(df) if df is not None else 0} rows")
+            return None
 
         # Handle MultiIndex columns from newer yfinance versions
         if isinstance(df.columns, pd.MultiIndex):
@@ -90,12 +125,94 @@ class TechnicalAnalyzer:
 
         # Drop any duplicate column names that might cause issues
         df = df.loc[:, ~df.columns.duplicated()]
+        return df
+
+    def _fetch_jugaad(self, ticker: str) -> pd.DataFrame | None:
+        """
+        Fallback #2: jugaad-data, which scrapes NSE's current (post-2021) website
+        directly. Returns clean numeric columns already — just needs renaming.
+        """
+        symbol = ticker.replace(".NS", "")
+        try:
+            from jugaad_data.nse import stock_df
+        except ImportError:
+            logger.debug("jugaad-data not installed — skipping this fallback")
+            return None
 
         try:
-            return self._compute_indicators(ticker, df)
+            raw = stock_df(
+                symbol=symbol,
+                from_date=date.today() - timedelta(days=TECHNICAL_LOOKBACK_DAYS),
+                to_date=date.today(),
+                series="EQ",
+            )
         except Exception as e:
-            logger.error(f"Indicator computation failed for {ticker}: {e}")
-            return self._empty_snapshot(ticker)
+            logger.warning(f"jugaad-data fetch failed for {ticker}: {e}")
+            return None
+
+        if raw is None or raw.empty:
+            return None
+
+        df = raw.rename(columns={
+            "OPEN": "Open", "HIGH": "High", "LOW": "Low", "CLOSE": "Close", "VOLUME": "Volume",
+        })[["DATE", "Open", "High", "Low", "Close", "Volume"]]
+        df["DATE"] = pd.to_datetime(df["DATE"]).dt.normalize()
+        df = df.dropna(subset=["Close"]).sort_values("DATE").set_index("DATE")
+        return df if len(df) >= 50 else None
+
+    def _fetch_nselib(self, ticker: str) -> pd.DataFrame | None:
+        """
+        Fallback #3: nselib. Empirically, a single request spanning more than
+        ~4 months returns a truncated/shifted date window with no error (e.g.
+        requesting the last 250 days returned only a ~4-month slice ending over a
+        month before the request's own `to_date`). To avoid silently feeding stale
+        data into the indicators, fetch in short chunks and stitch them together.
+        All numeric fields also come back as Indian comma-grouped strings
+        (e.g. "1,38,22,265") and need explicit cleaning.
+        """
+        symbol = ticker.replace(".NS", "")
+        try:
+            from nselib import capital_market
+        except ImportError:
+            logger.debug("nselib not installed — skipping this fallback")
+            return None
+
+        chunks = []
+        end = date.today()
+        start_bound = date.today() - timedelta(days=TECHNICAL_LOOKBACK_DAYS)
+        while end > start_bound:
+            chunk_start = max(start_bound, end - timedelta(days=NSE_FALLBACK_CHUNK_DAYS))
+            try:
+                raw = capital_market.price_volume_data(
+                    symbol=symbol,
+                    from_date=chunk_start.strftime("%d-%m-%Y"),
+                    to_date=end.strftime("%d-%m-%Y"),
+                )
+                if raw is not None and not raw.empty:
+                    chunks.append(raw)
+            except Exception as e:
+                logger.debug(f"nselib chunk fetch failed for {ticker} ({chunk_start}..{end}): {e}")
+            end = chunk_start - timedelta(days=1)
+
+        if not chunks:
+            return None
+
+        raw = pd.concat(chunks, ignore_index=True)
+
+        def _clean_num(series: pd.Series) -> pd.Series:
+            return pd.to_numeric(series.astype(str).str.replace(",", "", regex=False), errors="coerce")
+
+        df = pd.DataFrame({
+            "DATE": pd.to_datetime(raw["Date"], format="%d-%b-%Y", errors="coerce"),
+            "Open": _clean_num(raw["OpenPrice"]),
+            "High": _clean_num(raw["HighPrice"]),
+            "Low": _clean_num(raw["LowPrice"]),
+            "Close": _clean_num(raw["ClosePrice"]),
+            "Volume": _clean_num(raw["TotalTradedQuantity"]),
+        }).dropna(subset=["DATE", "Close"])
+
+        df = df.drop_duplicates(subset="DATE").sort_values("DATE").set_index("DATE")
+        return df if len(df) >= 50 else None
 
     def _compute_indicators(self, ticker: str, df: pd.DataFrame) -> TechnicalSnapshot:
         """Compute all technical indicators from price data."""

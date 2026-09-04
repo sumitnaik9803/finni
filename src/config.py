@@ -594,6 +594,13 @@ RECENCY_HALF_LIFE_HOURS = 6.0  # weight halves every 6 hours
 TECHNICAL_LOOKBACK_PERIOD = "8mo"   # 8 months to ensure SMA200 has enough data
 TECHNICAL_INTERVAL = "1d"           # Daily candles
 
+# Fallback data providers, tried in order if yfinance fails: jugaad-data, then nselib.
+# Both scrape nseindia.com directly and use the bare NSE symbol (no ".NS" suffix).
+TECHNICAL_LOOKBACK_DAYS = 250        # Calendar days to request from fallback providers (~8mo of trading days)
+NSE_FALLBACK_CHUNK_DAYS = 80         # nselib silently mis-windows requests spanning >~4 months (observed
+                                      # empirically — it returns a stale/shifted date range with no error),
+                                      # so fetch in short chunks and stitch them together instead.
+
 # RSI thresholds
 RSI_OVERSOLD = 30
 RSI_OVERBOUGHT = 70
@@ -607,10 +614,24 @@ VOLUME_RATIO_NOTABLE = 1.5
 # ──────────────────────────────────────────────
 
 # Groq (primary)
-GROQ_MODEL = "allam-2-7b"
+# openai/gpt-oss-120b: current production model (not preview), 131K context, native
+# JSON mode, and Groq's structured-output support. Replaces allam-2-7b (a small
+# Arabic-first model — a poor fit for English financial JSON, likely the cause of the
+# universal Sentiment Score = 0.0 seen in every report to date).
+# Free tier: 30 RPM / 1,000 RPD — plenty for ~200 scoring calls/day, but far below the
+# 14,400 RPD the old llama-3.1-8b-instant advertised (that model is now deprecated).
+GROQ_MODEL = "openai/gpt-oss-120b"
 GROQ_MAX_RPM = 25                  # Stay under 30 RPM limit with headroom
-GROQ_MAX_TOKENS = 500              # Standard response tokens
+GROQ_MAX_TOKENS = 1536             # gpt-oss is a reasoning model: hidden reasoning tokens
+                                    # still consume this budget even though they never reach
+                                    # the response content, so keep headroom over the ~150
+                                    # tokens the JSON payload itself needs.
 GROQ_TEMPERATURE = 0.1             # Low temp for consistent structured output
+GROQ_REASONING_EFFORT = "low"      # This is a short classification task, not a proof — minimize
+                                    # internal reasoning tokens rather than paying for depth we don't use.
+GROQ_REASONING_FORMAT = "hidden"   # Strip the reasoning trace from the response entirely so
+                                    # `response.choices[0].message.content` is JSON-only (no
+                                    # markdown fences or <think> blocks to strip downstream).
 
 # Gemini (fallback)
 GEMINI_MODEL = "gemini-2.0-flash"
