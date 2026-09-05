@@ -52,6 +52,7 @@ class StockSignal:
     article_count: int
     top_event: str
     top_event_title: str
+    all_headlines: str
     rsi: float
     sma_alignment: str
     macd_crossover: str
@@ -158,6 +159,7 @@ class SignalGenerator:
             article_count=digest.article_count,
             top_event=digest.top_event,
             top_event_title=digest.top_event_title,
+            all_headlines=digest.all_headlines,
             rsi=snapshot.rsi_14,
             sma_alignment=snapshot.sma_alignment,
             macd_crossover=snapshot.macd_crossover,

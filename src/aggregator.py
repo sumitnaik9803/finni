@@ -36,6 +36,7 @@ class DailyDigest:
     scored_article_count: int           # Articles with non-fallback scores
     top_event: str                      # Most impactful article's reasoning
     top_event_title: str                # Title of the most impactful article
+    all_headlines: str = ""             # Every matched headline, newest first, " | "-joined
     event_types: dict[str, int] = field(default_factory=dict)
     sector_spillovers: list[str] = field(default_factory=list)
     sentiment_articles: list[dict] = field(default_factory=list)  # summary per article for report
@@ -78,19 +79,22 @@ class Aggregator:
         # Calculate weighted scores
         weighted_scores = []
         total_weight = 0.0
-        max_impact_article = None
-        max_impact_weight = 0.0
 
         for article in scored_articles:
             weight = self._compute_weight(article, reference_time)
             weighted_scores.append((article.sentiment_score * weight, weight))
             total_weight += weight
 
-            # Track the most impactful article
-            article_impact = weight * abs(article.sentiment_score)
-            if article_impact > max_impact_weight:
-                max_impact_weight = article_impact
-                max_impact_article = article
+        # Pick the most impactful article. Rank by impact (weight x |score|), but break
+        # ties on weight alone — otherwise a set of articles that all scored exactly 0.0
+        # would leave this as None and blank out the report's event columns entirely.
+        max_impact_article = max(
+            scored_articles,
+            key=lambda a: (
+                self._compute_weight(a, reference_time) * abs(a.sentiment_score),
+                self._compute_weight(a, reference_time),
+            ),
+        )
 
         # Compute weighted average
         if total_weight > 0:
@@ -140,6 +144,10 @@ class Aggregator:
             scored_article_count=scored_count,
             top_event=max_impact_article.reasoning if max_impact_article else "",
             top_event_title=max_impact_article.article_title if max_impact_article else "",
+            all_headlines=" | ".join(
+                a.article_title
+                for a in sorted(scored_articles, key=lambda a: a.article_published_at, reverse=True)
+            ),
             event_types=dict(event_types),
             sector_spillovers=spillovers,
             sentiment_articles=sentiment_articles,

@@ -247,6 +247,9 @@ class ReportBuilder:
                 "Top Event": signal.top_event_title[:100] if signal.top_event_title else "",
                 "Key Reasoning": signal.top_event[:150] if signal.top_event else "",
                 "Volume Notable": "Yes" if signal.volume_notable else "No",
+                # Every headline matched for this stock, so the sheet always shows the
+                # underlying news even when sentiment came out flat.
+                "All Headlines": signal.all_headlines[:1000] if signal.all_headlines else "",
             })
 
         return rows

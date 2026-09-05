@@ -32,6 +32,7 @@ from src.config import (
     COMPANIES,
     CompanyConfig,
     GOOGLE_NEWS_RSS_TEMPLATE,
+    MAX_ARTICLES_PER_COMPANY,
     NEWS_SOURCES,
     NEWS_WINDOW_HOURS,
     NewsSourceConfig,
@@ -68,10 +69,9 @@ class NewsFetcher:
 
     def __init__(self, news_window_hours: int = NEWS_WINDOW_HOURS):
         self.news_window_hours = news_window_hours
-        # Determine window based on day of week (Monday = 66 hours to cover weekend)
+        # No weekday special-case needed: the window is wide enough to span weekends.
         now = datetime.now(timezone.utc)
-        hours = 66 if now.weekday() == 0 else NEWS_WINDOW_HOURS
-        self.cutoff_time = now - timedelta(hours=hours)
+        self.cutoff_time = now - timedelta(hours=news_window_hours)
 
     async def fetch_all(self, companies: list[CompanyConfig] | None = None) -> dict[str, list[NewsArticle]]:
         """
@@ -347,13 +347,12 @@ class NewsFetcher:
                     if article not in result[company.ticker]:
                         result[company.ticker].append(article)
 
-        # Limit to the 4 most recent articles per company to avoid LLM rate limits
+        # Cap articles per company to bound the number of LLM scoring calls
         for ticker in result:
             articles_list = result[ticker]
-            if len(articles_list) > 4:
-                # Sort by published_at descending and keep the top 4
-                articles_list.sort(key=lambda x: x.published_at, reverse=True)
-                result[ticker] = articles_list[:4]
+            # Newest first, so the report and digest lead with the freshest news
+            articles_list.sort(key=lambda x: x.published_at, reverse=True)
+            result[ticker] = articles_list[:MAX_ARTICLES_PER_COMPANY]
 
         return result
 

@@ -32,6 +32,7 @@ class SheetsPublisher:
         "Technical Score", "Technical Bias",
         "Last Close", "Day Change %", "RSI", "SMA Alignment", "MACD",
         "Articles", "Top Event", "Key Reasoning", "Volume Notable",
+        "All Headlines",
     ]
 
     def __init__(self):

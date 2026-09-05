@@ -551,7 +551,12 @@ GOOGLE_NEWS_RSS_TEMPLATE = (
 # ──────────────────────────────────────────────
 
 # News window: how many hours back to look for articles
-NEWS_WINDOW_HOURS = 18
+NEWS_WINDOW_HOURS = 168   # 7 days. Wide enough that thinly-covered stocks still
+                          # surface something, and it inherently spans weekends.
+
+# Cap on how many articles per company get sent to the LLM each run.
+# 49 companies x this = the per-run scoring call ceiling (Gemini free tier: 1,500/day).
+MAX_ARTICLES_PER_COMPANY = 8
 
 # Sentiment vs. technical weighting for the blended signal
 SENTIMENT_WEIGHT = 0.55
@@ -583,7 +588,12 @@ IMPACT_WEIGHTS = {
 }
 
 # Recency decay parameters (exponential decay)
-RECENCY_HALF_LIFE_HOURS = 6.0  # weight halves every 6 hours
+RECENCY_HALF_LIFE_HOURS = 48.0  # weight halves every 48 hours
+# Scaled to match NEWS_WINDOW_HOURS. The old 6h half-life was tuned for an 18h window;
+# inside a 7-day window it drove a week-old article's weight to ~4e-9, meaning the extra
+# days of news showed up in the report but had no effect on the score. At 48h the
+# gradient spans the window usefully: 1d ≈ 0.71, 2d ≈ 0.50, 7d ≈ 0.09 — recent news
+# still dominates without older news being erased entirely.
 
 
 # ──────────────────────────────────────────────
