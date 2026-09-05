@@ -26,6 +26,7 @@ from tenacity import (
 
 from src.config import (
     CompanyConfig,
+    LLM_PROVIDER_ORDER,
     GROQ_MAX_RPM,
     GROQ_MAX_TOKENS,
     GROQ_MODEL,
@@ -163,43 +164,56 @@ class LLMScorer:
                 results.append(self._neutral_fallback(article))
         return results
 
+    async def complete_json(self, prompt: str) -> tuple[dict, str] | None:
+        """
+        Send a prompt to the configured providers in order and return the first
+        successfully parsed JSON response as (parsed, provider_name).
+
+        Returns None if every provider failed. Shared by article scoring and the
+        sector pattern analyzer so both honour the same order and rate limiters.
+        """
+        for provider in LLM_PROVIDER_ORDER:
+            if provider == "groq":
+                available, limiter, call = self._groq_available, self.groq_limiter, self._call_groq
+            elif provider == "gemini":
+                available, limiter, call = self._gemini_available, self.gemini_limiter, self._call_gemini
+            else:
+                logger.warning(f"Unknown LLM provider in LLM_PROVIDER_ORDER: {provider}")
+                continue
+
+            if not available:
+                continue
+
+            try:
+                await limiter.acquire()
+                response_text = await call(prompt)
+            except Exception as e:
+                logger.warning(f"{provider} API call failed: {e}")
+                continue
+
+            try:
+                return self._parse_response(response_text), provider
+            except Exception as e:
+                logger.warning(f"{provider} parsing failed: {e}. Raw response: {response_text[:300]}")
+
+        return None
+
     async def score_article(
         self,
         article: NewsArticle,
         company: CompanyConfig,
     ) -> SentimentResult:
         """
-        Score a single article. Tries Groq first, falls back to Gemini.
+        Score a single article, trying each provider in LLM_PROVIDER_ORDER.
         """
         prompt = self._build_prompt(article, company)
 
-        # Try Groq first
-        if self._groq_available:
-            try:
-                await self.groq_limiter.acquire()
-                response_text = await self._call_groq(prompt)
-                try:
-                    parsed = self._parse_response(response_text)
-                    return self._build_result(parsed, article, provider="groq")
-                except Exception as e:
-                    logger.warning(f"Groq parsing failed: {e}. Raw response: {response_text[:300]}")
-            except Exception as e:
-                logger.warning(f"Groq API call failed: {e} — falling back to Gemini")
+        result = await self.complete_json(prompt)
+        if result is not None:
+            parsed, provider = result
+            return self._build_result(parsed, article, provider=provider)
 
-        # Fallback to Gemini
-        if self._gemini_available:
-            try:
-                await self.gemini_limiter.acquire()
-                response_text = await self._call_gemini(prompt)
-                try:
-                    parsed = self._parse_response(response_text)
-                    return self._build_result(parsed, article, provider="gemini")
-                except Exception as e:
-                    logger.error(f"Gemini parsing failed: {e}. Raw response: {response_text[:300]}")
-            except Exception as e:
-                logger.error(f"Gemini API call failed: {e}")
-
-        # Both failed — return neutral fallback
+        # Every provider failed — return neutral fallback
         logger.error(f"All LLM providers failed for: {article.title[:60]}")
         return self._neutral_fallback(article)
 

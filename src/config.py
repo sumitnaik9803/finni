@@ -613,7 +613,19 @@ VOLUME_RATIO_NOTABLE = 1.5
 # LLM Configuration
 # ──────────────────────────────────────────────
 
-# Groq (primary)
+# Provider order: each is tried in turn until one returns parseable JSON.
+#
+# Gemini leads because the binding free-tier constraint here is TOKENS, not requests:
+#   Groq gpt-oss-120b : 30 RPM /  8,000 TPM /   200,000 tokens per day
+#   Gemini 2.0 Flash  : 15 RPM /  1,000,000 TPM / 1,500 requests per day
+# A scoring call costs ~480 input + up to ~1K output tokens. Groq's 8K TPM therefore
+# only sustains ~5 calls/min, and its 200K TPD caps the whole day at ~100-300 articles
+# — running Groq first produced a sustained 429 storm. Gemini's TPM budget is 125x
+# larger and absorbs the full ~200-article workload comfortably.
+# Swap the order here to put Groq back in front.
+LLM_PROVIDER_ORDER = ["gemini", "groq"]
+
+# Groq (fallback)
 # openai/gpt-oss-120b: current production model (not preview), 131K context, native
 # JSON mode, and Groq's structured-output support. Replaces allam-2-7b (a small
 # Arabic-first model — a poor fit for English financial JSON, likely the cause of the
@@ -621,8 +633,11 @@ VOLUME_RATIO_NOTABLE = 1.5
 # Free tier: 30 RPM / 1,000 RPD — plenty for ~200 scoring calls/day, but far below the
 # 14,400 RPD the old llama-3.1-8b-instant advertised (that model is now deprecated).
 GROQ_MODEL = "openai/gpt-oss-120b"
-GROQ_MAX_RPM = 25                  # Stay under 30 RPM limit with headroom
-GROQ_MAX_TOKENS = 1536             # gpt-oss is a reasoning model: hidden reasoning tokens
+GROQ_MAX_RPM = 5                   # NOT the 30 RPM request cap — the real ceiling is 8,000 TPM.
+                                    # At ~480 input + 1,024 reserved output tokens per call,
+                                    # 5 calls/min ≈ 7,500 TPM. Setting this to 25 (the old value)
+                                    # ran ~3-8x over the token budget and 429-stormed.
+GROQ_MAX_TOKENS = 1024             # gpt-oss is a reasoning model: hidden reasoning tokens
                                     # still consume this budget even though they never reach
                                     # the response content, so keep headroom over the ~150
                                     # tokens the JSON payload itself needs.

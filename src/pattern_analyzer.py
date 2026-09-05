@@ -71,16 +71,12 @@ class PatternAnalyzer:
             prompt = PATTERN_PROMPT_TEMPLATE.format(sector=sector, timeline_data=timeline_data[:3000])
             
             try:
-                # Try Groq first, then Gemini
-                if self.scorer._groq_available:
-                    await self.scorer.groq_limiter.acquire()
-                    response_text = await self.scorer._call_groq(prompt)
-                    parsed = self.scorer._parse_response(response_text)
-                else:
-                    await self.scorer.gemini_limiter.acquire()
-                    response_text = await self.scorer._call_gemini(prompt)
-                    parsed = self.scorer._parse_response(response_text)
-                    
+                # Shared provider chain — same order, limiters and fallback as scoring.
+                result = await self.scorer.complete_json(prompt)
+                if result is None:
+                    raise RuntimeError("all LLM providers failed")
+                parsed, _provider = result
+
                 patterns[sector] = SectorPattern(
                     sector=sector,
                     trend=parsed.get("trend", "Neutral"),
