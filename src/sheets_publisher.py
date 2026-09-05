@@ -91,10 +91,11 @@ class SheetsPublisher:
             # Write headers first
             sheet.append_row(self.DAILY_LOG_HEADERS, value_input_option="RAW")
             logger.info("Wrote Daily Log headers")
-        elif existing[0] != self.DAILY_LOG_HEADERS:
-            # Header row is stale — a column was added or renamed since this sheet was
-            # created. Rewrite row 1 in place so new columns are labelled rather than
-            # appearing under a blank heading. Existing data rows are left untouched.
+        elif existing[0] == self.DAILY_LOG_HEADERS:
+            pass  # Header row is already correct
+        elif self._is_header_row(existing[0]):
+            # Stale header row — a column was added or renamed since this sheet was
+            # created. Rewrite row 1 in place. Data rows are left untouched.
             last_cell = gspread.utils.rowcol_to_a1(1, len(self.DAILY_LOG_HEADERS))
             sheet.update(
                 values=[self.DAILY_LOG_HEADERS],
@@ -105,6 +106,11 @@ class SheetsPublisher:
                 f"Updated Daily Log headers ({len(existing[0])} -> "
                 f"{len(self.DAILY_LOG_HEADERS)} columns)"
             )
+        else:
+            # The sheet starts straight into data with no header row at all. INSERT a
+            # header above it — overwriting row 1 here would destroy a real data row.
+            sheet.insert_row(self.DAILY_LOG_HEADERS, index=1, value_input_option="RAW")
+            logger.info("Inserted missing Daily Log header row above existing data")
 
         # Append each stock's row
         for row_data in rows:
@@ -167,6 +173,17 @@ class SheetsPublisher:
         )
 
         logger.info("Dashboard sheet updated")
+
+    @classmethod
+    def _is_header_row(cls, row: list[str]) -> bool:
+        """
+        True if this row is a header rather than data. The first column is "Date":
+        a header row holds that literal label, a data row holds an actual date
+        ("2026-08-26"). Used to avoid overwriting real data on a header-less sheet.
+        """
+        if not row:
+            return False
+        return row[0].strip().lower() == cls.DAILY_LOG_HEADERS[0].strip().lower()
 
     def _get_or_create_sheet(self, title: str) -> gspread.Worksheet:
         """Get an existing worksheet by title, or create it."""
