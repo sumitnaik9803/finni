@@ -633,9 +633,9 @@ VOLUME_RATIO_NOTABLE = 1.5
 SCREENER_URL_TEMPLATE = "https://www.screener.in/company/{symbol}/"
 SCREENER_SEARCH_URL = "https://www.screener.in/api/company/search/"
 SCREENER_TIMEOUT_SECONDS = 20
-SCREENER_SYMBOL_OVERRIDES = {
-    "LTIM": "LTIMINDTREE",
-}
+# Empty for now: LTIM was mapped to LTIMINDTREE here, but that 404s too — LTIM has no
+# screener page at all, so the miss path (search, then blank cells) is the right answer.
+SCREENER_SYMBOL_OVERRIDES: dict[str, str] = {}
 
 # Articles for one company are scored in a single batched request. Summaries are
 # trimmed harder than in the single-article prompt since 8 of them share one call.
@@ -645,11 +645,11 @@ BATCH_SUMMARY_CHARS = 240
 #
 # Gemini leads because the binding free-tier constraint here is TOKENS, not requests:
 #   Groq gpt-oss-120b : 30 RPM /  8,000 TPM /   200,000 tokens per day
-#   Gemini 2.0 Flash  : 15 RPM /  1,000,000 TPM / 1,500 requests per day
+#   Gemini Flash      : ~10 RPM /  250,000 TPM / 250-1,000 requests per day
 # A scoring call costs ~480 input + up to ~1K output tokens. Groq's 8K TPM therefore
 # only sustains ~5 calls/min, and its 200K TPD caps the whole day at ~100-300 articles
 # — running Groq first produced a sustained 429 storm. Gemini's TPM budget is 125x
-# larger and absorbs the full ~200-article workload comfortably.
+# larger and absorbs the batched workload (49 calls/run) comfortably.
 # Swap the order here to put Groq back in front.
 LLM_PROVIDER_ORDER = ["gemini", "groq"]
 
@@ -676,11 +676,41 @@ GROQ_REASONING_FORMAT = "hidden"   # Strip the reasoning trace from the response
                                     # `response.choices[0].message.content` is JSON-only (no
                                     # markdown fences or <think> blocks to strip downstream).
 
-# Gemini (fallback)
-GEMINI_MODEL = "gemini-2.0-flash"
-GEMINI_MAX_RPM = 12                # Stay under 15 RPM limit
-GEMINI_MAX_TOKENS = 500
+# Gemini
+# Google is retiring the old "AIza..." standard keys: every key AI Studio issues now
+# is an *auth key* with an "AQ." prefix, bound to a service account, and the Gemini API
+# rejects standard keys from September 2026. So the AQ. key is correct — what broke us
+# is the ENDPOINT. Auth keys are documented against the Interactions API
+# (/v1beta/interactions); the legacy models/{model}:generateContent surface answers an
+# AQ. key with 401 ACCESS_TOKEN_TYPE_UNSUPPORTED. llm_scorer calls Interactions first
+# and only falls back to generateContent, so both key formats work.
+GEMINI_USE_INTERACTIONS_API = True
+GEMINI_INTERACTIONS_URL = "https://generativelanguage.googleapis.com/v1beta/interactions"
+GEMINI_GENERATECONTENT_URL = (
+    "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+)
+GEMINI_MODELS_URL = "https://generativelanguage.googleapis.com/v1beta/models"
+
+# Free-tier model names churn fast (2.0 -> 2.5 -> 3.x within a year), and naming a
+# retired one fails the whole provider. So this is a preference list: on first use the
+# scorer asks the API which models the account actually has and takes the first match.
+# GEMINI_MODEL is only the fallback for when that listing call itself fails.
+GEMINI_MODEL_PREFERENCES = [
+    "gemini-3.1-flash-lite",
+    "gemini-3.5-flash",
+    "gemini-2.5-flash-lite",
+    "gemini-2.5-flash",
+    "gemini-2.0-flash",
+]
+GEMINI_MODEL = "gemini-2.5-flash"
+
+# Free tier (2026): ~10-15 RPM, 250,000 TPM, 250-1,000 requests/day depending on model.
+# Still ~31x Groq's 8,000 TPM, which is why Gemini leads the provider order.
+GEMINI_MAX_RPM = 8
+GEMINI_MAX_TOKENS = 1500           # Batch scoring returns one JSON object per article,
+                                    # so 8 articles need far more room than a single score.
 GEMINI_TEMPERATURE = 0.1
+GEMINI_TIMEOUT_SECONDS = 60
 
 
 # ──────────────────────────────────────────────

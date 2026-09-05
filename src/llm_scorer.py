@@ -3,8 +3,9 @@ Finni LLM Scorer — Sentiment scoring via Groq (primary) + Google Gemini (fallb
 
 Design choices:
 - Single-pass structured JSON prompt: sentiment score, label, reasoning, spillover, event type
-- Groq llama-3.1-8b-instant as primary (fast, 14,400 req/day free)
-- Gemini 2.0 Flash as fallback on 429/5xx errors
+- Gemini Flash primary, Groq gpt-oss-120b fallback (see LLM_PROVIDER_ORDER)
+- Gemini reached over the Interactions API, since AI Studio now issues only "AQ."
+  auth keys and the legacy generateContent endpoint rejects those
 - AsyncIO rate limiter to stay well under RPM limits
 - Robust JSON parsing with fallback extraction
 """
@@ -14,6 +15,8 @@ import json
 import logging
 import os
 import re
+
+import aiohttp
 from dataclasses import dataclass, field
 from datetime import datetime
 
@@ -34,10 +37,16 @@ from src.config import (
     GROQ_REASONING_EFFORT,
     GROQ_REASONING_FORMAT,
     GROQ_TEMPERATURE,
+    GEMINI_GENERATECONTENT_URL,
+    GEMINI_INTERACTIONS_URL,
     GEMINI_MAX_RPM,
     GEMINI_MAX_TOKENS,
     GEMINI_MODEL,
+    GEMINI_MODEL_PREFERENCES,
+    GEMINI_MODELS_URL,
     GEMINI_TEMPERATURE,
+    GEMINI_TIMEOUT_SECONDS,
+    GEMINI_USE_INTERACTIONS_API,
     get_gemini_api_key,
     get_groq_api_key,
     TICKER_TO_COMPANY,
@@ -147,6 +156,8 @@ class LLMScorer:
         self.gemini_limiter = RateLimiter(GEMINI_MAX_RPM)
         self._groq_available = True
         self._gemini_available = True
+        self._gemini_surface = None        # "interactions" | "generatecontent", once known
+        self._gemini_resolved_model = None  # Set on the first Gemini call of the run
 
     def _get_groq_client(self):
         """Lazy-init Groq client."""
@@ -382,37 +393,160 @@ class LLMScorer:
         )
         return response.choices[0].message.content
 
+    async def _resolve_gemini_model(self, session) -> str:
+        """
+        Ask the API which models this key can actually use, once per run.
+
+        Free-tier model names turn over fast, and a request naming a retired model
+        fails exactly like a bad key, which makes the real problem hard to see. If
+        the listing call fails we fall back to the configured GEMINI_MODEL.
+        """
+        if self._gemini_resolved_model is not None:
+            return self._gemini_resolved_model
+
+        self._gemini_resolved_model = GEMINI_MODEL  # Fallback unless listing succeeds.
+        try:
+            async with session.get(
+                GEMINI_MODELS_URL,
+                headers={"x-goog-api-key": get_gemini_api_key()},
+                timeout=aiohttp.ClientTimeout(total=GEMINI_TIMEOUT_SECONDS),
+            ) as resp:
+                if resp.status != 200:
+                    logger.warning(
+                        f"Gemini model listing failed ({resp.status}) — "
+                        f"using configured {GEMINI_MODEL}"
+                    )
+                    return self._gemini_resolved_model
+                data = await resp.json()
+        except Exception as e:
+            logger.warning(f"Gemini model listing errored ({e}) — using {GEMINI_MODEL}")
+            return self._gemini_resolved_model
+
+        available = {
+            (m.get("name") or "").removeprefix("models/")
+            for m in data.get("models", [])
+        }
+        for candidate in GEMINI_MODEL_PREFERENCES:
+            if candidate in available:
+                self._gemini_resolved_model = candidate
+                logger.info(f"Gemini model resolved to {candidate}")
+                break
+        else:
+            logger.warning(
+                f"None of {GEMINI_MODEL_PREFERENCES} available to this key "
+                f"(saw {len(available)} models) — using {GEMINI_MODEL}"
+            )
+        return self._gemini_resolved_model
+
     async def _call_gemini(self, prompt: str) -> str:
-        """Call Gemini API via REST to bypass SDK API key format bugs."""
-        api_key = get_gemini_api_key()
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
-        
+        """
+        Call Gemini over REST.
+
+        Two surfaces exist and the choice is not cosmetic. AI Studio now issues only
+        "AQ." auth keys, and those are documented against the Interactions API; the
+        legacy models/{model}:generateContent endpoint rejects them with
+        401 ACCESS_TOKEN_TYPE_UNSUPPORTED. Older "AIza" standard keys work on
+        generateContent but are themselves being retired. So: try Interactions first,
+        fall back to generateContent, and whichever succeeds is remembered for the
+        rest of the run so we stop paying for the failed attempt on every call.
+        """
+        headers = {
+            "x-goog-api-key": get_gemini_api_key(),
+            "Content-Type": "application/json",
+        }
+        errors = []
+
+        async with aiohttp.ClientSession() as session:
+            model = await self._resolve_gemini_model(session)
+
+            surfaces = ["interactions", "generatecontent"]
+            if self._gemini_surface is not None:
+                surfaces = [self._gemini_surface]
+            elif not GEMINI_USE_INTERACTIONS_API:
+                surfaces = ["generatecontent", "interactions"]
+
+            for surface in surfaces:
+                url, payload, extract = self._gemini_request(surface, model, prompt)
+                try:
+                    async with session.post(
+                        url,
+                        headers=headers,
+                        json=payload,
+                        timeout=aiohttp.ClientTimeout(total=GEMINI_TIMEOUT_SECONDS),
+                    ) as response:
+                        body = await response.text()
+                        if response.status != 200:
+                            errors.append(f"{surface} -> {response.status}: {body[:200]}")
+                            continue
+                        data = json.loads(body)
+                except Exception as e:
+                    errors.append(f"{surface} -> {e}")
+                    continue
+
+                try:
+                    text = extract(data)
+                except (KeyError, IndexError, TypeError) as e:
+                    errors.append(f"{surface} -> malformed response: {e}")
+                    continue
+
+                if self._gemini_surface != surface:
+                    self._gemini_surface = surface
+                    logger.info(f"Gemini responding on the {surface} endpoint")
+                return text
+
+        raise RuntimeError("Gemini REST API failed (" + " | ".join(errors) + ")")
+
+    @staticmethod
+    def _gemini_request(surface: str, model: str, prompt: str):
+        """Build (url, payload, response-extractor) for one Gemini API surface."""
+        if surface == "interactions":
+            payload = {
+                "model": model,
+                "input": prompt,
+                "generation_config": {
+                    "temperature": GEMINI_TEMPERATURE,
+                    "max_output_tokens": GEMINI_MAX_TOKENS,
+                },
+                "response_format": [
+                    {"type": "text", "mime_type": "application/json"}
+                ],
+            }
+            return GEMINI_INTERACTIONS_URL, payload, LLMScorer._extract_interactions_text
+
         payload = {
             "contents": [{"parts": [{"text": prompt}]}],
             "generationConfig": {
                 "temperature": GEMINI_TEMPERATURE,
                 "maxOutputTokens": GEMINI_MAX_TOKENS,
-                "responseMimeType": "application/json"
-            }
+                "responseMimeType": "application/json",
+            },
         }
-        
-        headers = {
-            "x-goog-api-key": api_key,
-            "Content-Type": "application/json"
-        }
-        
-        import aiohttp
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, headers=headers, json=payload) as response:
-                if response.status != 200:
-                    error_text = await response.text()
-                    raise RuntimeError(f"Gemini REST API failed ({response.status}): {error_text}")
-                data = await response.json()
-                
-        try:
-            return data["candidates"][0]["content"]["parts"][0]["text"]
-        except (KeyError, IndexError) as e:
-            raise ValueError(f"Malformed Gemini response: {data}") from e
+        url = GEMINI_GENERATECONTENT_URL.format(model=model)
+        return url, payload, LLMScorer._extract_generatecontent_text
+
+    @staticmethod
+    def _extract_generatecontent_text(data: dict) -> str:
+        return data["candidates"][0]["content"]["parts"][0]["text"]
+
+    @staticmethod
+    def _extract_interactions_text(data: dict) -> str:
+        """
+        Pull the text out of an Interactions response.
+
+        The payload is a `steps` timeline rather than a single candidate, and a step
+        can hold several text blocks, so join every text block from the model_output
+        steps in order.
+        """
+        chunks = []
+        for step in data.get("steps", []):
+            if step.get("type") not in (None, "model_output"):
+                continue
+            for block in step.get("content", []):
+                if block.get("type") == "text" and block.get("text"):
+                    chunks.append(block["text"])
+        if not chunks:
+            raise KeyError(f"no text blocks in interactions response: {str(data)[:200]}")
+        return "".join(chunks)
 
     # Models occasionally spell a decimal out mid-number ("confidence": 0. nine),
     # which is not valid JSON and killed otherwise-good responses.

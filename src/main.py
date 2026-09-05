@@ -4,7 +4,7 @@ Finni Pipeline Orchestrator — Runs the full daily analysis pipeline.
 Sequence:
 1. Load company configuration
 2. Fetch news from RSS feeds (async)
-3. Score each article via LLM (Groq primary, Gemini fallback)
+3. Score each company's articles via LLM in one batched call (Gemini primary, Groq fallback)
 4. Aggregate per-company daily sentiment digest
 5. Fetch price data and compute technical indicators
    (yfinance primary, jugaad-data then nselib as fallbacks)
