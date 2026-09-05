@@ -16,7 +16,7 @@ RSS Feeds (ET, BS, Mint, Google News)
     │
     ▼
 ┌──────────────────┐
-│  LLM Scorer      │──→ Groq (primary) + Gemini Flash (fallback)
+│  LLM Scorer      │──→ Groq gpt-oss-120b (primary) + Gemini Flash (fallback)
 │  (Sentiment)     │    Single-pass JSON: score, reasoning, spillover
 └──────────────────┘
     │
@@ -26,7 +26,7 @@ RSS Feeds (ET, BS, Mint, Google News)
 └──────────────────┘
     │
     ▼                    ┌──────────────────┐
-    ├────────────────────│  Technicals      │──→ yfinance + pandas-ta
+    ├────────────────────│  Technicals      │──→ yfinance → jugaad-data → nselib
     │                    │  (Price Data)    │    RSI, SMAs, MACD, ATR, Volume
     │                    └──────────────────┘
     ▼
@@ -42,18 +42,15 @@ RSS Feeds (ET, BS, Mint, Google News)
 └──────────────────┘     └──────────────────┘
 ```
 
-## 📋 Tracked Companies (v1)
+## 📋 Tracked Companies
 
-| Ticker | Company | Sector |
-|--------|---------|--------|
-| RELIANCE | Reliance Industries | Diversified (Oil/Telecom/Retail) |
-| TCS | Tata Consultancy Services | IT |
-| HDFCBANK | HDFC Bank | Banking |
-| MARUTI | Maruti Suzuki | Automobile |
-| SUNPHARMA | Sun Pharma | Pharmaceuticals |
-| ITC | ITC Limited | FMCG |
-| TITAN | Titan Company | Consumer Discretionary |
-| BHARTIARTL | Bharti Airtel | Telecom |
+Finni tracks **49 NSE large-caps** spanning Financials, IT, Auto, FMCG, Energy,
+Healthcare, Materials, Industrials, Telecom and Consumer Discretionary — including
+Reliance, TCS, HDFC Bank, ICICI Bank, Infosys, SBI, ITC, Bharti Airtel, L&T,
+Maruti Suzuki, Sun Pharma, Tata Motors, Titan and Adani Enterprises.
+
+The authoritative list is `COMPANIES` in [src/config.py](src/config.py) — edit that
+to add or remove a stock.
 
 ## ⏰ Schedule
 
@@ -101,6 +98,7 @@ finni/
 │   ├── aggregator.py           # Weighted sentiment aggregation
 │   ├── technicals.py           # Price data & technical indicators
 │   ├── signal_generator.py     # Blended signal generation
+│   ├── pattern_analyzer.py     # 14-day rolling sector pattern analysis
 │   ├── report_builder.py       # Report formatting
 │   ├── sheets_publisher.py     # Google Sheets integration
 │   └── main.py                 # Pipeline orchestrator
@@ -126,9 +124,10 @@ finni/
 
 All free / open-source:
 - **Python 3.12**
-- **Groq API** (Llama 3.1 8B) — free tier, 14,400 req/day
+- **Groq API** (`openai/gpt-oss-120b`) — free tier, 30 req/min, 1,000 req/day
 - **Google Gemini API** (Flash) — free tier fallback
-- **yfinance** + **pandas-ta** — price data & technicals
+- **yfinance** + **jugaad-data** + **nselib** — price data (3-tier fallback)
+- **pandas-ta** — technical indicators
 - **feedparser** + **aiohttp** — RSS ingestion
 - **gspread** — Google Sheets integration
 - **GitHub Actions** — free cron scheduling (public repo)

@@ -330,23 +330,22 @@ class NewsFetcher:
 
                 # Keyword matching — use word-boundary regex for short keywords
                 # to prevent false positives (e.g., 'itc' matching 'critical')
+                matched = False
                 for keyword in company.keywords:
                     kw = keyword.lower()
                     if len(kw) <= 4:
                         # Short keywords need word-boundary matching
-                        if re.search(r'\b' + re.escape(kw) + r'\b', searchable):
-                            matched = True
-                        else:
-                            matched = False
+                        matched = re.search(r'\b' + re.escape(kw) + r'\b', searchable) is not None
                     else:
                         matched = kw in searchable
+                    if matched:
+                        break  # One keyword match is enough for this company
 
                 if matched:
-                        if company.ticker not in article.matched_tickers:
-                            article.matched_tickers.append(company.ticker)
-                        if article not in result[company.ticker]:
-                            result[company.ticker].append(article)
-                        break  # One keyword match is enough for this company
+                    if company.ticker not in article.matched_tickers:
+                        article.matched_tickers.append(company.ticker)
+                    if article not in result[company.ticker]:
+                        result[company.ticker].append(article)
 
         # Limit to the 4 most recent articles per company to avoid LLM rate limits
         for ticker in result:

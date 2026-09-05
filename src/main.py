@@ -7,10 +7,11 @@ Sequence:
 3. Score each article via LLM (Groq primary, Gemini fallback)
 4. Aggregate per-company daily sentiment digest
 5. Fetch price data and compute technical indicators
+   (yfinance primary, jugaad-data then nselib as fallbacks)
 6. Generate blended buy/sell signals
-7. Build Markdown report + structured data
-8. Publish to Google Sheets
-9. Save Markdown report to data/reports/
+7. Analyze 14-day rolling sector patterns from saved report history
+8. Build Markdown report + structured data, saved to data/reports/
+9. Publish to Google Sheets
 
 Designed to run as a GitHub Actions cron job at ~6:45 AM IST (1:15 AM UTC),
 completing well before the 9:00 AM market open.
@@ -62,7 +63,7 @@ async def run_pipeline():
     # ──────────────────────────────────────────
     # Step 2: Fetch news
     # ──────────────────────────────────────────
-    logger.info("📰 Step 2/8: Fetching news from RSS feeds...")
+    logger.info("📰 Step 2/9: Fetching news from RSS feeds...")
     fetcher = NewsFetcher()
     news_map = await fetcher.fetch_all(companies)
     total_articles = sum(len(v) for v in news_map.values())
@@ -76,7 +77,7 @@ async def run_pipeline():
     # ──────────────────────────────────────────
     # Step 3: Score articles via LLM
     # ──────────────────────────────────────────
-    logger.info("🤖 Step 3/8: Scoring articles via LLM...")
+    logger.info("🤖 Step 3/9: Scoring articles via LLM...")
     scorer = LLMScorer()
     scored_map = {}
 
@@ -96,7 +97,7 @@ async def run_pipeline():
     # ──────────────────────────────────────────
     # Step 4: Aggregate daily digests
     # ──────────────────────────────────────────
-    logger.info("📊 Step 4/8: Aggregating daily digests...")
+    logger.info("📊 Step 4/9: Aggregating daily digests...")
     aggregator = Aggregator()
     digests = {}
 
@@ -112,7 +113,7 @@ async def run_pipeline():
     # ──────────────────────────────────────────
     # Step 5: Technical analysis
     # ──────────────────────────────────────────
-    logger.info("📈 Step 5/8: Computing technical indicators...")
+    logger.info("📈 Step 5/9: Computing technical indicators...")
     tech_analyzer = TechnicalAnalyzer()
     snapshots = {}
 
@@ -128,7 +129,7 @@ async def run_pipeline():
     # ──────────────────────────────────────────
     # Step 6: Generate signals
     # ──────────────────────────────────────────
-    logger.info("🎯 Step 6/8: Generating signals...")
+    logger.info("🎯 Step 6/9: Generating signals...")
     signal_gen = SignalGenerator()
     analysis = signal_gen.generate(digests, snapshots)
 
@@ -146,7 +147,7 @@ async def run_pipeline():
     # Step 7: 14-Day Sector Pattern Analysis
     # ──────────────────────────────────────────
     logger.info("🧠 Step 7/9: Analyzing 14-day sector patterns...")
-    pattern_analyzer = PatternAnalyzer()
+    pattern_analyzer = PatternAnalyzer(scorer=scorer)
     patterns = await pattern_analyzer.analyze_patterns()
 
     # ──────────────────────────────────────────

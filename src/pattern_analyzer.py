@@ -10,6 +10,16 @@ from src.llm_scorer import LLMScorer
 
 logger = logging.getLogger(__name__)
 
+# Placeholder strings the report writes when a company had no news that day —
+# they carry no signal, so they are left out of the timeline.
+PLACEHOLDER_DRIVERS = {
+    "",
+    "none",
+    "(none)",
+    "no news articles found for this company today.",
+}
+
+
 @dataclass
 class SectorPattern:
     sector: str
@@ -32,8 +42,11 @@ Respond ONLY with valid JSON format:
 class PatternAnalyzer:
     """Reads 14 days of history to find overarching sector patterns."""
 
-    def __init__(self):
-        self.scorer = LLMScorer()  # Reuse the LLM setup from llm_scorer
+    def __init__(self, scorer: LLMScorer | None = None):
+        # Share the pipeline's existing scorer so its rate limiters are shared too —
+        # a second LLMScorer would carry its own limiter and the two could together
+        # exceed the provider's RPM cap.
+        self.scorer = scorer or LLMScorer()
 
     async def analyze_patterns(self) -> dict[str, SectorPattern]:
         """Analyzes 14 days of history per sector and returns patterns."""
@@ -115,19 +128,25 @@ class PatternAnalyzer:
                 ticker = row.get("Ticker")
                 if not ticker:
                     continue
-                    
-                company = TICKER_TO_COMPANY.get(ticker)
+
+                # report_builder writes the bare NSE symbol (".NS" stripped), but
+                # TICKER_TO_COMPANY is keyed by the full yfinance ticker.
+                company = TICKER_TO_COMPANY.get(ticker) or TICKER_TO_COMPANY.get(f"{ticker}.NS")
                 if not company:
                     continue
-                    
+
                 sector = company.sector
                 signal = row.get("Signal", "N/A")
-                blended = row.get("Blended_Score", "0.0")
-                driver = row.get("Top_Event", "")
-                
-                if driver and driver != "None":
-                    entry = f"{company.short_name}: {signal} (Score: {blended}) - {driver}"
-                    sector_map[sector][date_str].append(entry)
+                blended = row.get("Blended Score", 0.0)
+                # "Top Event" is the headline; "Key Reasoning" is the LLM's own note on it.
+                driver = row.get("Top Event") or row.get("Key Reasoning") or ""
+
+                # Include the day even with no news driver — the signal/score trend
+                # over 14 days is itself part of the pattern we're asking about.
+                entry = f"{company.short_name}: {signal} (Score: {blended})"
+                if driver.strip().lower() not in PLACEHOLDER_DRIVERS:
+                    entry += f" - {driver}"
+                sector_map[sector][date_str].append(entry)
                     
         # Format as string
         formatted_timelines = {}
