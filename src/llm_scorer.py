@@ -25,6 +25,7 @@ from tenacity import (
 )
 
 from src.config import (
+    BATCH_SUMMARY_CHARS,
     CompanyConfig,
     LLM_PROVIDER_ORDER,
     GROQ_MAX_RPM,
@@ -113,6 +114,29 @@ CALIBRATION ANCHORS:
 """
 
 
+# Batched variant: every article for one company scored in a SINGLE request.
+# One call per company instead of one per article cuts request count ~8x and
+# token use even further, since the preamble is sent once rather than per article.
+SENTIMENT_BATCH_PROMPT_TEMPLATE = """You are an Indian stock market analyst. Analyze EACH numbered news article below for its impact on {company_name} ({ticker}), which operates in the {sector} / {sub_sector} sector. Today is {current_date}.
+
+ARTICLES:
+{articles_block}
+
+Respond ONLY with a valid JSON array — exactly one object per article, in the same order, reusing each article's "id" (no markdown fences, no extra text):
+[{{"id": <int>, "sentiment_score": <float from -1.0 to +1.0>, "sentiment_label": "<VERY_BEARISH|BEARISH|NEUTRAL|BULLISH|VERY_BULLISH>", "confidence": <float 0.0 to 1.0>, "impact_magnitude": "<HIGH|MEDIUM|LOW>", "reasoning": "<1-2 sentence explanation>", "sector_spillover": <null or "brief note">, "event_type": "<EARNINGS|REGULATORY|MACRO|PRODUCT|MANAGEMENT|LEGAL|SECTOR_TREND|MARKET_SENTIMENT|OTHER>"}}]
+
+Write every number as a plain numeral (0.9, never "0. nine").
+
+CALIBRATION ANCHORS:
+- +1.0: Massive positive catalyst (huge earnings beat, major contract win)
+- +0.5: Positive news (upgrade, solid product launch, good quarter)
+- +0.1: Mildly positive, routine positive mention
+-  0.0: Factual, purely macro without specific company impact, or unrelated
+- -0.5: Negative news (downgrade, earnings miss, executive exit)
+- -1.0: Major crisis (fraud, massive lawsuit, bankruptcy risk)
+"""
+
+
 class LLMScorer:
     """Scores news articles for sentiment using LLM APIs."""
 
@@ -152,23 +176,113 @@ class LLMScorer:
         articles: list[NewsArticle],
         company: CompanyConfig,
     ) -> list[SentimentResult]:
-        """Score a batch of articles for a single company."""
+        """
+        Score every article for one company in a SINGLE LLM call.
+
+        Scoring one article per request meant 350+ requests a day, which blew
+        through the provider's daily token allowance before the run finished —
+        the preamble alone was re-sent with every article. Batching sends it once.
+        Falls back to per-article calls only if the batch response can't be used.
+        """
+        if not articles:
+            return []
+
+        prompt = self._build_batch_prompt(articles, company)
+        result = await self.complete_json(prompt, expect_array=True)
+
+        if result is not None:
+            parsed, provider = result
+            scored = self._build_batch_results(parsed, articles, provider)
+            if scored is not None:
+                return scored
+            logger.warning(
+                f"{company.short_name}: batch response did not cover all "
+                f"{len(articles)} articles — falling back to per-article scoring"
+            )
+        else:
+            logger.warning(
+                f"{company.short_name}: batch scoring failed — falling back to per-article"
+            )
+
+        # Fallback: original one-call-per-article path.
         results = []
         for article in articles:
             try:
-                result = await self.score_article(article, company)
-                results.append(result)
+                results.append(await self.score_article(article, company))
             except Exception as e:
                 logger.error(f"Failed to score article '{article.title[:60]}...': {e}")
-                # Create a neutral fallback result so the pipeline doesn't break
                 results.append(self._neutral_fallback(article))
         return results
 
-    async def complete_json(self, prompt: str) -> tuple[dict, str] | None:
+    def _build_batch_prompt(
+        self, articles: list[NewsArticle], company: CompanyConfig
+    ) -> str:
+        """Render all of a company's articles into one numbered prompt."""
+        blocks = []
+        for i, article in enumerate(articles, 1):
+            summary = (article.summary or "(no summary)")[:BATCH_SUMMARY_CHARS]
+            blocks.append(
+                f"[{i}] Title: {article.title}\n"
+                f"    Source: {article.source} | Published: "
+                f"{article.published_at.strftime('%Y-%m-%d %H:%M')}\n"
+                f"    Summary: {summary}"
+            )
+
+        return SENTIMENT_BATCH_PROMPT_TEMPLATE.format(
+            company_name=company.name,
+            ticker=company.ticker,
+            sector=company.sector,
+            sub_sector=company.sub_sector,
+            current_date=datetime.now().strftime("%Y-%m-%d"),
+            articles_block="\n\n".join(blocks),
+        )
+
+    def _build_batch_results(
+        self, parsed: object, articles: list[NewsArticle], provider: str
+    ) -> list[SentimentResult] | None:
+        """
+        Map a parsed JSON array back onto the articles it scored.
+
+        Returns None if the response can't be matched up, so the caller can retry
+        per-article rather than silently emitting neutral scores.
+        """
+        if not isinstance(parsed, list) or not parsed:
+            return None
+
+        # Prefer the model's own "id" field; fall back to positional order.
+        by_id: dict[int, dict] = {}
+        for pos, item in enumerate(parsed, 1):
+            if not isinstance(item, dict):
+                continue
+            try:
+                idx = int(item.get("id", pos))
+            except (TypeError, ValueError):
+                idx = pos
+            by_id.setdefault(idx, item)
+
+        if len(by_id) < len(articles):
+            return None
+
+        results = []
+        for i, article in enumerate(articles, 1):
+            item = by_id.get(i)
+            if item is None:
+                return None
+            try:
+                results.append(self._build_result(item, article, provider=provider))
+            except Exception as e:
+                logger.warning(f"Malformed entry for article {i}: {e}")
+                results.append(self._neutral_fallback(article))
+        return results
+
+    async def complete_json(
+        self, prompt: str, expect_array: bool = False
+    ) -> tuple[dict | list, str] | None:
         """
         Send a prompt to the configured providers in order and return the first
         successfully parsed JSON response as (parsed, provider_name).
 
+        Set expect_array=True when the prompt asks for a JSON array (batch scoring).
         Returns None if every provider failed. Shared by article scoring and the
         sector pattern analyzer so both honour the same order and rate limiters.
         """
@@ -192,7 +306,7 @@ class LLMScorer:
                 continue
 
             try:
-                return self._parse_response(response_text), provider
+                return self._parse_response(response_text, expect_array), provider
             except Exception as e:
                 logger.warning(f"{provider} parsing failed: {e}. Raw response: {response_text[:300]}")
 
@@ -211,7 +325,9 @@ class LLMScorer:
         result = await self.complete_json(prompt)
         if result is not None:
             parsed, provider = result
-            return self._build_result(parsed, article, provider=provider)
+            if isinstance(parsed, dict):
+                return self._build_result(parsed, article, provider=provider)
+            logger.warning(f"{provider} returned a non-object for a single article")
 
         # Every provider failed — return neutral fallback
         logger.error(f"All LLM providers failed for: {article.title[:60]}")
@@ -298,11 +414,27 @@ class LLMScorer:
         except (KeyError, IndexError) as e:
             raise ValueError(f"Malformed Gemini response: {data}") from e
 
-    def _parse_response(self, response_text: str) -> dict:
+    # Models occasionally spell a decimal out mid-number ("confidence": 0. nine),
+    # which is not valid JSON and killed otherwise-good responses.
+    _SPELLED_DIGITS = {
+        "zero": "0", "one": "1", "two": "2", "three": "3", "four": "4",
+        "five": "5", "six": "6", "seven": "7", "eight": "8", "nine": "9",
+    }
+
+    @classmethod
+    def _repair_spelled_decimals(cls, text: str) -> str:
+        """Turn `0. nine` into `0.9`. No-op when the JSON is already clean."""
+        pattern = re.compile(
+            r"(\d)\.\s*(" + "|".join(cls._SPELLED_DIGITS) + r")\b", re.IGNORECASE
+        )
+        return pattern.sub(
+            lambda m: f"{m.group(1)}.{cls._SPELLED_DIGITS[m.group(2).lower()]}", text
+        )
+
+    def _parse_response(self, response_text: str, expect_array: bool = False) -> dict | list:
         """
-        Parse LLM response into a dict. Handles common issues:
-        - Markdown fences around JSON
-        - Partial/malformed JSON
+        Parse an LLM response into a dict (or a list when expect_array is set).
+        Handles markdown fences, surrounding prose, and spelled-out decimals.
         """
         if not response_text:
             raise ValueError("Empty response from LLM")
@@ -314,17 +446,24 @@ class LLMScorer:
             cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
             cleaned = re.sub(r"\s*```$", "", cleaned)
 
+        cleaned = self._repair_spelled_decimals(cleaned)
+
         try:
             return json.loads(cleaned)
         except json.JSONDecodeError:
-            # Try to find JSON object in the response
-            match = re.search(r"\{.*\}", cleaned, re.DOTALL)
+            pass
+
+        # Fall back to carving the JSON out of surrounding prose.
+        patterns = [r"\[.*\]", r"\{.*\}"] if expect_array else [r"\{.*\}", r"\[.*\]"]
+        for pattern in patterns:
+            match = re.search(pattern, cleaned, re.DOTALL)
             if match:
                 try:
                     return json.loads(match.group())
                 except json.JSONDecodeError:
-                    pass
-            raise ValueError(f"Could not parse LLM response as JSON: {cleaned[:200]}")
+                    continue
+
+        raise ValueError(f"Could not parse LLM response as JSON: {cleaned[:200]}")
 
     def _build_result(
         self, parsed: dict, article: NewsArticle, provider: str

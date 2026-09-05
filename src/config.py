@@ -623,6 +623,24 @@ VOLUME_RATIO_NOTABLE = 1.5
 # LLM Configuration
 # ──────────────────────────────────────────────
 
+# ──────────────────────────────────────────────
+# Fundamentals (screener.in)
+# ──────────────────────────────────────────────
+
+# Screener keys its company pages off the bare NSE symbol, so most tickers map
+# straight through once ".NS" is stripped. A handful of listings use a different
+# symbol there; add them here as they turn up (a miss is logged, not fatal).
+SCREENER_URL_TEMPLATE = "https://www.screener.in/company/{symbol}/"
+SCREENER_SEARCH_URL = "https://www.screener.in/api/company/search/"
+SCREENER_TIMEOUT_SECONDS = 20
+SCREENER_SYMBOL_OVERRIDES = {
+    "LTIM": "LTIMINDTREE",
+}
+
+# Articles for one company are scored in a single batched request. Summaries are
+# trimmed harder than in the single-article prompt since 8 of them share one call.
+BATCH_SUMMARY_CHARS = 240
+
 # Provider order: each is tried in turn until one returns parseable JSON.
 #
 # Gemini leads because the binding free-tier constraint here is TOKENS, not requests:

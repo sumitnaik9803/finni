@@ -26,6 +26,7 @@ from datetime import date
 
 from src.aggregator import Aggregator
 from src.config import COMPANIES, get_company
+from src.fundamentals import FundamentalsFetcher
 from src.llm_scorer import LLMScorer
 from src.news_fetcher import NewsFetcher
 from src.pattern_analyzer import PatternAnalyzer
@@ -127,6 +128,15 @@ async def run_pipeline():
         )
 
     # ──────────────────────────────────────────
+    # Step 5b: Fundamentals (screener.in)
+    # ──────────────────────────────────────────
+    logger.info("💰 Fetching fundamentals from screener.in...")
+    fundamentals = await FundamentalsFetcher().fetch_all(
+        ticker_list, {c.ticker: c.name for c in companies}
+    )
+    logger.info(f"💰 Fundamentals retrieved for {len(fundamentals)}/{len(ticker_list)} companies")
+
+    # ──────────────────────────────────────────
     # Step 6: Generate signals
     # ──────────────────────────────────────────
     logger.info("🎯 Step 6/9: Generating signals...")
@@ -155,7 +165,10 @@ async def run_pipeline():
     # ──────────────────────────────────────────
     logger.info("📝 Step 8/9: Building report...")
     builder = ReportBuilder()
-    report = builder.build(analysis, digests, snapshots, patterns, pipeline_start_time=start_time)
+    report = builder.build(
+        analysis, digests, snapshots, patterns, fundamentals,
+        pipeline_start_time=start_time,
+    )
 
     # Save Markdown report and JSON data to disk
     builder.save_reports(report)

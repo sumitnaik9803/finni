@@ -32,6 +32,7 @@ class ReportBuilder:
         digests: dict[str, DailyDigest],
         snapshots: dict[str, TechnicalSnapshot],
         patterns: dict[str, SectorPattern],
+        fundamentals: dict[str, dict[str, float]] | None = None,
         pipeline_start_time: float | None = None,
     ) -> dict:
         """
@@ -60,7 +61,8 @@ class ReportBuilder:
         md = self._build_markdown(analysis, digests, snapshots, patterns, report_date, timestamp, runtime_str)
 
         # Build Sheets data
-        sheets_rows = self._build_sheets_rows(analysis, digests, snapshots, report_date)
+        fundamentals = fundamentals or {}
+        sheets_rows = self._build_sheets_rows(analysis, digests, snapshots, report_date, fundamentals)
         dashboard = self._build_dashboard_data(analysis, digests, snapshots, report_date, timestamp, runtime_str)
 
         return {
@@ -220,12 +222,14 @@ class ReportBuilder:
         digests: dict[str, DailyDigest],
         snapshots: dict[str, TechnicalSnapshot],
         report_date: str,
+        fundamentals: dict[str, dict[str, float]],
     ) -> list[dict]:
         """Build rows for the 'Daily Log' sheet (one row per stock per day)."""
         rows = []
         for rank, signal in enumerate(analysis.rankings, 1):
             snapshot = snapshots.get(signal.ticker)
             digest = digests.get(signal.ticker)
+            fund = fundamentals.get(signal.ticker, {})
 
             rows.append({
                 "Date": report_date,
@@ -250,6 +254,11 @@ class ReportBuilder:
                 # Every headline matched for this stock, so the sheet always shows the
                 # underlying news even when sentiment came out flat.
                 "All Headlines": signal.all_headlines[:1000] if signal.all_headlines else "",
+                # Fundamentals from screener.in — blank when the lookup missed.
+                "P/E": fund.get("pe_ratio", ""),
+                "ROCE %": fund.get("roce", ""),
+                "ROE %": fund.get("roe", ""),
+                "Div Yield %": fund.get("dividend_yield", ""),
             })
 
         return rows

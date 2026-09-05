@@ -33,6 +33,7 @@ class SheetsPublisher:
         "Last Close", "Day Change %", "RSI", "SMA Alignment", "MACD",
         "Articles", "Top Event", "Key Reasoning", "Volume Notable",
         "All Headlines",
+        "P/E", "ROCE %", "ROE %", "Div Yield %",
     ]
 
     def __init__(self):
