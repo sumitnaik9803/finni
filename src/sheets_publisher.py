@@ -91,6 +91,20 @@ class SheetsPublisher:
             # Write headers first
             sheet.append_row(self.DAILY_LOG_HEADERS, value_input_option="RAW")
             logger.info("Wrote Daily Log headers")
+        elif existing[0] != self.DAILY_LOG_HEADERS:
+            # Header row is stale — a column was added or renamed since this sheet was
+            # created. Rewrite row 1 in place so new columns are labelled rather than
+            # appearing under a blank heading. Existing data rows are left untouched.
+            last_cell = gspread.utils.rowcol_to_a1(1, len(self.DAILY_LOG_HEADERS))
+            sheet.update(
+                values=[self.DAILY_LOG_HEADERS],
+                range_name=f"A1:{last_cell}",
+                value_input_option="RAW",
+            )
+            logger.info(
+                f"Updated Daily Log headers ({len(existing[0])} -> "
+                f"{len(self.DAILY_LOG_HEADERS)} columns)"
+            )
 
         # Append each stock's row
         for row_data in rows:
