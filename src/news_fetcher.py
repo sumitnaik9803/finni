@@ -288,25 +288,65 @@ class NewsFetcher:
                 seen_urls.add(normalized_url)
                 url_deduped.append(article)
 
-        # Step 2: Fuzzy title dedup — keep the article from the higher-tier source
+        # Step 2: Fuzzy title dedup — keep the article from the higher-tier source.
+        #
+        # This compares every article against every survivor, so the pair count grows
+        # with the square of the feed: ~2,900 articles is ~3 million comparisons, and
+        # a full SequenceMatcher.ratio() on a ~115-character title is far too
+        # expensive to run that many times — it took 9.4 minutes of a 41-minute run.
+        #
+        # The comparison order and the 0.85 threshold are unchanged. What changes is
+        # how much work each pair costs:
+        #
+        #   1. A length bound. ratio() is 2*matches/total, and matches can never
+        #      exceed the shorter title, so 2*min/(la+lb) is a hard ceiling. Most
+        #      pairs are different enough in length to fail this on integer math
+        #      alone.
+        #   2. quick_ratio(), difflib's own cheaper upper bound (shared characters,
+        #      ignoring order). Skipping when a documented upper bound is already at
+        #      or below the threshold cannot change the outcome.
+        #   3. One SequenceMatcher per survivor, kept alive with its title as the
+        #      second sequence. difflib indexes that sequence once and reuses it, and
+        #      set_seq1() leaves the index intact — so the expensive half of the
+        #      comparison is done once per survivor instead of once per pair.
+        #
+        # Every skip is driven by a proven upper bound, so the output is identical to
+        # the exhaustive version, not an approximation of it.
         final: list[NewsArticle] = []
+        lowered: list[str] = []                  # survivor titles, pre-lowercased
+        matchers: list[SequenceMatcher] = []     # one per survivor, seq2 pre-indexed
+
         for article in url_deduped:
+            title = article.title.lower()
+            length = len(title)
             is_dup = False
-            for existing in final:
-                similarity = SequenceMatcher(
-                    None,
-                    article.title.lower(),
-                    existing.title.lower(),
-                ).ratio()
-                if similarity > 0.85:
-                    # Keep the one from the better (lower-numbered) tier
-                    if article.source_tier < existing.source_tier:
-                        final.remove(existing)
-                        final.append(article)
-                    is_dup = True
-                    break
+
+            for i, existing_title in enumerate(lowered):
+                total = length + len(existing_title)
+                if total and 2 * min(length, len(existing_title)) / total <= 0.85:
+                    continue
+
+                matcher = matchers[i]
+                matcher.set_seq1(title)
+                if matcher.quick_ratio() <= 0.85:
+                    continue
+                if matcher.ratio() <= 0.85:
+                    continue
+
+                # Keep the one from the better (lower-numbered) tier
+                if article.source_tier < final[i].source_tier:
+                    del final[i], lowered[i], matchers[i]
+                    final.append(article)
+                    lowered.append(title)
+                    matchers.append(SequenceMatcher(None, None, title))
+                is_dup = True
+                break
+
             if not is_dup:
                 final.append(article)
+                lowered.append(title)
+                # seq2 is this survivor's title; seq1 is set per comparison above.
+                matchers.append(SequenceMatcher(None, None, title))
 
         return final
 
