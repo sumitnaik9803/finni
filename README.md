@@ -97,16 +97,62 @@ finni/
 │   ├── llm_scorer.py           # LLM sentiment scoring
 │   ├── aggregator.py           # Weighted sentiment aggregation
 │   ├── technicals.py           # Price data & technical indicators
+│   ├── fundamentals.py         # screener.in valuation ratios
 │   ├── signal_generator.py     # Blended signal generation
 │   ├── pattern_analyzer.py     # 14-day rolling sector pattern analysis
 │   ├── report_builder.py       # Report formatting
 │   ├── sheets_publisher.py     # Google Sheets integration
+│   ├── telemetry.py            # Per-dependency call tally (run summary)
 │   └── main.py                 # Pipeline orchestrator
+├── scripts/
+│   └── check_gemini.py         # Diagnose a Gemini key against both API surfaces
 ├── data/reports/               # Historical daily reports (auto-committed)
 ├── requirements.txt
 ├── setup_guide.md              # Detailed setup instructions
 └── README.md
 ```
+
+## 🔍 Debugging a Run
+
+Every run ends with a summary of **all external calls**, grouped by dependency, so
+you can see at a glance what worked and how much of the run each thing carried:
+
+```
+ LLM
+   Gemini             47 ok     1 failed   [98% success]
+        via: interactions/gemini-flash-latest x47
+        model=gemini-flash-latest  endpoint=interactions
+        why: HTTP 404 (model retired) x1
+   Groq                2 ok     1 failed   [67% success]
+        why: 429 daily quota exhausted x1
+ MARKET DATA
+   yfinance           45 ok     4 failed   [92% success]
+   jugaad-data         4 ok     0 failed   [100% success]
+```
+
+It prints even when the pipeline crashes — a failed run is exactly the one whose
+call tally you need.
+
+**Deeper digging:**
+
+| Want to see | Do this |
+|---|---|
+| Every LLM prompt and raw response | `FINNI_DEBUG_LLM=1` before running |
+| Whether a Gemini key works, and on which endpoint | `python scripts/check_gemini.py $GEMINI_API_KEY` |
+
+### Gemini API keys
+
+Google AI Studio now issues only **auth keys** (`AQ.` prefix); the old `AIza`
+standard keys are rejected from September 2026. Auth keys work against the
+**Interactions API**, not the legacy `generateContent` endpoint — calling the wrong
+one returns `401 ACCESS_TOKEN_TYPE_UNSUPPORTED`, which looks like a bad key but
+isn't. Finni tries Interactions first and falls back automatically, so both key
+formats work.
+
+Free-tier model names are also retired on a months-long cycle, and `ListModels`
+still advertises models that 404 when you call them. `GEMINI_MODEL_PREFERENCES` in
+[src/config.py](src/config.py) is therefore a list tried in order, led by the
+self-updating `-latest` aliases; a 404 moves to the next candidate mid-run.
 
 ## 📊 Signal Legend
 

@@ -691,18 +691,24 @@ GEMINI_GENERATECONTENT_URL = (
 )
 GEMINI_MODELS_URL = "https://generativelanguage.googleapis.com/v1beta/models"
 
-# Free-tier model names churn fast (2.0 -> 2.5 -> 3.x within a year), and naming a
-# retired one fails the whole provider. So this is a preference list: on first use the
-# scorer asks the API which models the account actually has and takes the first match.
-# GEMINI_MODEL is only the fallback for when that listing call itself fails.
+# Free-tier model names churn fast (2.0 -> 2.5 -> 3.x inside a year) and a retired
+# name fails with a 404 that looks nothing like a rate limit. Worse, ListModels is not
+# a reliable guide: it still advertises gemini-2.5-flash to accounts that get
+# "no longer available to new users" when they actually call it. So this is a
+# preference list tried in order, and a 404 moves to the next entry at runtime.
+#
+# The "-latest" aliases lead deliberately: they track whatever Google currently ships,
+# which is the only entry that cannot go stale.
 GEMINI_MODEL_PREFERENCES = [
-    "gemini-3.1-flash-lite",
-    "gemini-3.5-flash",
+    "gemini-flash-latest",
+    "gemini-3.6-flash",
+    "gemini-3-flash-preview",
+    "gemini-flash-lite-latest",
+    "gemini-3.1-flash-lite-preview",
     "gemini-2.5-flash-lite",
     "gemini-2.5-flash",
-    "gemini-2.0-flash",
 ]
-GEMINI_MODEL = "gemini-2.5-flash"
+GEMINI_MODEL = "gemini-flash-latest"
 
 # Free tier (2026): ~10-15 RPM, 250,000 TPM, 250-1,000 requests/day depending on model.
 # Still ~31x Groq's 8,000 TPM, which is why Gemini leads the provider order.

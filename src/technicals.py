@@ -15,6 +15,7 @@ import pandas as pd
 import pandas_ta as ta
 import yfinance as yf
 
+from src.telemetry import telemetry
 from src.config import (
     NSE_FALLBACK_CHUNK_DAYS,
     RSI_OVERBOUGHT,
@@ -75,16 +76,21 @@ class TechnicalAnalyzer:
         """
         logger.info(f"Fetching technical data for {ticker}")
 
+        # Each tier is counted separately: a run where yfinance served 45 of 49 is
+        # healthy, one where jugaad-data carried 40 means Yahoo is blocking the runner.
         df = self._fetch_yfinance(ticker)
         source = "yfinance"
+        self._record(df, "yfinance")
 
         if df is None:
             df = self._fetch_jugaad(ticker)
             source = "jugaad-data"
+            self._record(df, "jugaad")
 
         if df is None:
             df = self._fetch_nselib(ticker)
             source = "nselib"
+            self._record(df, "nselib")
 
         if df is None or df.empty or len(df) < 50:
             logger.warning(
@@ -100,6 +106,14 @@ class TechnicalAnalyzer:
         except Exception as e:
             logger.error(f"Indicator computation failed for {ticker} (source={source}): {e}")
             return self._empty_snapshot(ticker)
+
+    @staticmethod
+    def _record(df: "pd.DataFrame | None", component: str):
+        """Tally one market-data attempt so the run summary shows which tier served."""
+        if df is None:
+            telemetry.fail(component, "no data")
+        else:
+            telemetry.ok(component)
 
     def _fetch_yfinance(self, ticker: str) -> pd.DataFrame | None:
         """Primary source: Yahoo Finance via yfinance. Returns None on any failure."""

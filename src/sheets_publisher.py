@@ -14,6 +14,7 @@ import logging
 import gspread
 
 from src.config import get_google_sheet_id, get_google_sheets_credentials
+from src.telemetry import telemetry
 
 logger = logging.getLogger(__name__)
 
@@ -66,21 +67,26 @@ class SheetsPublisher:
         """
         try:
             self._connect()
-        except Exception:
+        except Exception as e:
             logger.error("Skipping Google Sheets publish — connection failed")
+            telemetry.fail("sheets", f"connect: {type(e).__name__}")
             return
 
         # Publish to Daily Log
         try:
             self._append_daily_log(report["sheets_data"])
+            telemetry.ok("sheets", "Daily Log")
         except Exception as e:
             logger.error(f"Failed to update Daily Log sheet: {e}")
+            telemetry.fail("sheets", f"Daily Log: {type(e).__name__}")
 
         # Publish to Dashboard
         try:
             self._update_dashboard(report["dashboard_data"])
+            telemetry.ok("sheets", "Dashboard")
         except Exception as e:
             logger.error(f"Failed to update Dashboard sheet: {e}")
+            telemetry.fail("sheets", f"Dashboard: {type(e).__name__}")
 
     def _append_daily_log(self, rows: list[dict]):
         """Append rows to the Daily Log sheet."""

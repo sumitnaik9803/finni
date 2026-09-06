@@ -34,6 +34,7 @@ from src.report_builder import ReportBuilder
 from src.sheets_publisher import SheetsPublisher
 from src.signal_generator import SignalGenerator
 from src.technicals import TechnicalAnalyzer
+from src.telemetry import telemetry
 
 # Configure logging
 logging.basicConfig(
@@ -205,6 +206,10 @@ def main():
     except Exception as e:
         logger.exception(f"Pipeline failed with error: {e}")
         sys.exit(1)
+    finally:
+        # Printed even when the pipeline crashed: a failed run is precisely the one
+        # whose external-call tally you need in order to see what went wrong.
+        logger.info(telemetry.render())
 
 
 if __name__ == "__main__":

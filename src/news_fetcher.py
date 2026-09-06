@@ -28,6 +28,8 @@ from bs4 import BeautifulSoup
 from dateutil import parser as date_parser
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
+from src.telemetry import telemetry
+
 from src.config import (
     COMPANIES,
     CompanyConfig,
@@ -110,6 +112,7 @@ class NewsFetcher:
             for result in results:
                 if isinstance(result, Exception):
                     logger.warning(f"Feed fetch failed: {result}")
+                    telemetry.fail("rss", type(result).__name__)
                     continue
                 all_articles.extend(result)
 
@@ -163,6 +166,7 @@ class NewsFetcher:
                 articles.append(article)
 
         logger.debug(f"  {source.name}: {len(articles)} articles within window")
+        telemetry.ok("rss", source.name)
         return articles
 
     async def _fetch_og_description(self, session: aiohttp.ClientSession, url: str) -> str | None:

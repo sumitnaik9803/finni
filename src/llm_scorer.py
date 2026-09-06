@@ -52,6 +52,7 @@ from src.config import (
     TICKER_TO_COMPANY,
 )
 from src.news_fetcher import NewsArticle
+from src.telemetry import debug_llm_enabled, telemetry
 
 logger = logging.getLogger(__name__)
 
@@ -156,8 +157,9 @@ class LLMScorer:
         self.gemini_limiter = RateLimiter(GEMINI_MAX_RPM)
         self._groq_available = True
         self._gemini_available = True
-        self._gemini_surface = None        # "interactions" | "generatecontent", once known
-        self._gemini_resolved_model = None  # Set on the first Gemini call of the run
+        self._gemini_surface = None      # "interactions" | "generatecontent", once known
+        self._gemini_model = None        # Pinned once a model actually answers
+        self._gemini_model_queue = None  # Candidate models, resolved once per run
 
     def _get_groq_client(self):
         """Lazy-init Groq client."""
@@ -314,14 +316,36 @@ class LLMScorer:
                 response_text = await call(prompt)
             except Exception as e:
                 logger.warning(f"{provider} API call failed: {e}")
+                if provider == "groq":
+                    telemetry.fail("groq", self._groq_failure_reason(e))
                 continue
 
             try:
                 return self._parse_response(response_text, expect_array), provider
             except Exception as e:
                 logger.warning(f"{provider} parsing failed: {e}. Raw response: {response_text[:300]}")
+                telemetry.fail(provider, "unparseable JSON")
 
         return None
+
+    @staticmethod
+    def _groq_failure_reason(exc: Exception) -> str:
+        """
+        Bucket a Groq exception into something countable.
+
+        Rate limits are the failure that actually matters here, and Groq has two very
+        different ones (per-minute vs per-day) that need telling apart in the summary:
+        a TPM hit means slow down, a TPD hit means the day is over.
+        """
+        text = str(exc)
+        if "429" in text or "rate limit" in text.lower():
+            if "per day" in text.lower() or "TPD" in text or "RPD" in text:
+                return "429 daily quota exhausted"
+            return "429 rate limited"
+        status = getattr(exc, "status_code", None)
+        if status:
+            return f"HTTP {status}"
+        return type(exc).__name__
 
     async def score_article(
         self,
@@ -371,7 +395,11 @@ class LLMScorer:
         """Call Groq API synchronously (wrapped in executor for async compat)."""
         client = self._get_groq_client()
         if client is None:
+            telemetry.skip("groq", "client unavailable")
             raise RuntimeError("Groq client not available")
+
+        if debug_llm_enabled():
+            logger.info(f"[groq] --> prompt ({len(prompt)} chars): {prompt[:400]}")
 
         loop = asyncio.get_event_loop()
         response = await loop.run_in_executor(
@@ -391,20 +419,22 @@ class LLMScorer:
                 reasoning_format=GROQ_REASONING_FORMAT,
             ),
         )
-        return response.choices[0].message.content
+        text = response.choices[0].message.content
+        telemetry.ok("groq", GROQ_MODEL)
+        telemetry.note("groq", "model", GROQ_MODEL)
+        if debug_llm_enabled():
+            logger.info(f"[groq] <-- response: {(text or '')[:400]}")
+        return text
 
-    async def _resolve_gemini_model(self, session) -> str:
+    async def _gemini_visible_models(self, session) -> set[str]:
         """
-        Ask the API which models this key can actually use, once per run.
+        Ask the API which models this key can see. Informational only.
 
-        Free-tier model names turn over fast, and a request naming a retired model
-        fails exactly like a bad key, which makes the real problem hard to see. If
-        the listing call fails we fall back to the configured GEMINI_MODEL.
+        ListModels is NOT authoritative — it advertised gemini-2.5-flash to an account
+        that then got "no longer available to new users" on the actual call. So this
+        never drives the choice of model; it exists so the log can say what the account
+        can actually see on the day every candidate fails.
         """
-        if self._gemini_resolved_model is not None:
-            return self._gemini_resolved_model
-
-        self._gemini_resolved_model = GEMINI_MODEL  # Fallback unless listing succeeds.
         try:
             async with session.get(
                 GEMINI_MODELS_URL,
@@ -412,89 +442,166 @@ class LLMScorer:
                 timeout=aiohttp.ClientTimeout(total=GEMINI_TIMEOUT_SECONDS),
             ) as resp:
                 if resp.status != 200:
-                    logger.warning(
-                        f"Gemini model listing failed ({resp.status}) — "
-                        f"using configured {GEMINI_MODEL}"
-                    )
-                    return self._gemini_resolved_model
+                    logger.warning(f"Gemini ListModels failed (HTTP {resp.status})")
+                    return set()
                 data = await resp.json()
         except Exception as e:
-            logger.warning(f"Gemini model listing errored ({e}) — using {GEMINI_MODEL}")
-            return self._gemini_resolved_model
+            logger.warning(f"Gemini ListModels errored: {e}")
+            return set()
 
-        available = {
+        names = {
             (m.get("name") or "").removeprefix("models/")
             for m in data.get("models", [])
         }
-        for candidate in GEMINI_MODEL_PREFERENCES:
-            if candidate in available:
-                self._gemini_resolved_model = candidate
-                logger.info(f"Gemini model resolved to {candidate}")
-                break
-        else:
+        telemetry.note("gemini", "models_visible", len(names))
+        return names
+
+    async def _gemini_candidates(self, session) -> list[str]:
+        """
+        The model queue for this run, in the order they will be tried.
+
+        Preference order wins over the listing, precisely because the listing lies.
+        The listing is used only to warn loudly when none of our candidates appear —
+        the one case where the log should tell you to go edit config.
+        """
+        if self._gemini_model_queue is not None:
+            return self._gemini_model_queue
+
+        queue = list(GEMINI_MODEL_PREFERENCES)
+        if GEMINI_MODEL not in queue:
+            queue.append(GEMINI_MODEL)
+        self._gemini_model_queue = queue
+
+        visible = await self._gemini_visible_models(session)
+        if visible and not visible.intersection(queue):
+            flash = sorted(n for n in visible if "flash" in n)[:8]
             logger.warning(
-                f"None of {GEMINI_MODEL_PREFERENCES} available to this key "
-                f"(saw {len(available)} models) — using {GEMINI_MODEL}"
+                "None of the configured Gemini models are visible to this key. "
+                f"Visible flash models: {', '.join(flash) or 'none'}. "
+                "Update GEMINI_MODEL_PREFERENCES in src/config.py."
             )
-        return self._gemini_resolved_model
+        return queue
 
     async def _call_gemini(self, prompt: str) -> str:
         """
-        Call Gemini over REST.
+        Call Gemini over REST, working around two independent moving targets.
 
-        Two surfaces exist and the choice is not cosmetic. AI Studio now issues only
-        "AQ." auth keys, and those are documented against the Interactions API; the
-        legacy models/{model}:generateContent endpoint rejects them with
-        401 ACCESS_TOKEN_TYPE_UNSUPPORTED. Older "AIza" standard keys work on
-        generateContent but are themselves being retired. So: try Interactions first,
-        fall back to generateContent, and whichever succeeds is remembered for the
-        rest of the run so we stop paying for the failed attempt on every call.
+        1. ENDPOINT. AI Studio now issues only "AQ." auth keys, documented against the
+           Interactions API; the legacy models/{model}:generateContent surface answers
+           them with 401 ACCESS_TOKEN_TYPE_UNSUPPORTED. Older "AIza" standard keys are
+           the reverse, and are themselves retired from September 2026.
+        2. MODEL. Free-tier model names are retired on a months-long cycle, and a
+           retired name returns 404 — a per-model problem, not a dead provider. So a
+           404 advances to the next candidate instead of failing the call, and when
+           Google's error names a replacement ("use models/gemini-3.6-flash") that
+           replacement is tried next.
+
+        The first (model, surface) pair that works is pinned for the rest of the run,
+        so this search costs a few calls once, not on every article.
         """
         headers = {
             "x-goog-api-key": get_gemini_api_key(),
             "Content-Type": "application/json",
         }
-        errors = []
+        errors: list[str] = []
+
+        if debug_llm_enabled():
+            logger.info(f"[gemini] --> prompt ({len(prompt)} chars): {prompt[:400]}")
 
         async with aiohttp.ClientSession() as session:
-            model = await self._resolve_gemini_model(session)
+            queue = list(await self._gemini_candidates(session))
+            if self._gemini_model:          # Pinned by an earlier successful call.
+                queue = [self._gemini_model]
 
-            surfaces = ["interactions", "generatecontent"]
-            if self._gemini_surface is not None:
-                surfaces = [self._gemini_surface]
-            elif not GEMINI_USE_INTERACTIONS_API:
-                surfaces = ["generatecontent", "interactions"]
+            i = 0
+            while i < len(queue):
+                model = queue[i]
+                i += 1
 
-            for surface in surfaces:
-                url, payload, extract = self._gemini_request(surface, model, prompt)
-                try:
-                    async with session.post(
-                        url,
-                        headers=headers,
-                        json=payload,
-                        timeout=aiohttp.ClientTimeout(total=GEMINI_TIMEOUT_SECONDS),
-                    ) as response:
-                        body = await response.text()
-                        if response.status != 200:
-                            errors.append(f"{surface} -> {response.status}: {body[:200]}")
-                            continue
-                        data = json.loads(body)
-                except Exception as e:
-                    errors.append(f"{surface} -> {e}")
+                surfaces = ["interactions", "generatecontent"]
+                if self._gemini_surface is not None:
+                    surfaces = [self._gemini_surface]
+                elif not GEMINI_USE_INTERACTIONS_API:
+                    surfaces = ["generatecontent", "interactions"]
+
+                retired = False
+                for surface in surfaces:
+                    url, payload, extract = self._gemini_request(surface, model, prompt)
+                    try:
+                        async with session.post(
+                            url,
+                            headers=headers,
+                            json=payload,
+                            timeout=aiohttp.ClientTimeout(total=GEMINI_TIMEOUT_SECONDS),
+                        ) as response:
+                            status = response.status
+                            body = await response.text()
+                    except Exception as e:
+                        errors.append(f"{model}/{surface}: {e}")
+                        telemetry.fail("gemini", type(e).__name__)
+                        continue
+
+                    if status == 404:
+                        # The model is gone, not the provider — and both surfaces give
+                        # the same verdict, so stop here and move to the next model.
+                        errors.append(f"{model}/{surface}: 404 {body[:120]}")
+                        telemetry.fail("gemini", "HTTP 404 (model retired)")
+                        retired = True
+                        for name in self._suggested_models(body):
+                            if name not in queue:
+                                queue.insert(i, name)
+                                logger.info(
+                                    f"Gemini reports {model} retired; trying its "
+                                    f"suggested replacement {name}"
+                                )
+                        break
+
+                    if status != 200:
+                        errors.append(f"{model}/{surface}: {status} {body[:120]}")
+                        telemetry.fail("gemini", f"HTTP {status}")
+                        continue
+
+                    try:
+                        text = extract(json.loads(body))
+                    except Exception as e:
+                        errors.append(f"{model}/{surface}: malformed response: {e}")
+                        telemetry.fail("gemini", "malformed response")
+                        continue
+
+                    if self._gemini_surface != surface or self._gemini_model != model:
+                        self._gemini_surface = surface
+                        self._gemini_model = model
+                        logger.info(f"Gemini locked in: {model} via {surface}")
+                        telemetry.note("gemini", "model", model)
+                        telemetry.note("gemini", "endpoint", surface)
+                    telemetry.ok("gemini", f"{surface}/{model}")
+                    if debug_llm_enabled():
+                        logger.info(f"[gemini] <-- response: {text[:400]}")
+                    return text
+
+                if retired:
                     continue
 
-                try:
-                    text = extract(data)
-                except (KeyError, IndexError, TypeError) as e:
-                    errors.append(f"{surface} -> malformed response: {e}")
-                    continue
+        raise RuntimeError("Gemini REST failed (" + " | ".join(errors[:4]) + ")")
 
-                if self._gemini_surface != surface:
-                    self._gemini_surface = surface
-                    logger.info(f"Gemini responding on the {surface} endpoint")
-                return text
+    # Google's 404 body names the replacement: "Please update your code to use
+    # models/gemini-3.6-flash". Mining that is how this survives a rename unattended.
+    _MODEL_SUGGESTION_RE = re.compile(r"models/([A-Za-z0-9][A-Za-z0-9.\-]*)")
 
-        raise RuntimeError("Gemini REST API failed (" + " | ".join(errors) + ")")
+    @classmethod
+    def _suggested_models(cls, body: str) -> list[str]:
+        """
+        Model names Google's error body recommends.
+
+        The first match is the model we just called, so it is dropped; anything after
+        it is the suggested replacement.
+        """
+        seen, out = set(), []
+        for name in cls._MODEL_SUGGESTION_RE.findall(body or ""):
+            if name not in seen:
+                seen.add(name)
+                out.append(name)
+        return out[1:]
 
     @staticmethod
     def _gemini_request(surface: str, model: str, prompt: str):

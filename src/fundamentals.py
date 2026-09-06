@@ -21,6 +21,7 @@ import re
 import aiohttp
 from bs4 import BeautifulSoup
 
+from src.telemetry import telemetry
 from src.config import (
     SCREENER_SEARCH_URL,
     SCREENER_SYMBOL_OVERRIDES,
@@ -155,9 +156,15 @@ class FundamentalsFetcher:
 
         if html is None:
             logger.warning(f"screener.in has no usable page for {symbol}")
+            telemetry.fail("screener", "no page")
             return None
 
-        return self._parse_ratios(html, symbol)
+        ratios = self._parse_ratios(html, symbol)
+        if ratios is None:
+            telemetry.fail("screener", "no ratios parsed")
+        else:
+            telemetry.ok("screener")
+        return ratios
 
     def _parse_ratios(self, html: str, symbol: str) -> dict[str, float] | None:
         """Extract the #top-ratios list into a flat metric dict."""
