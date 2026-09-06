@@ -633,9 +633,41 @@ VOLUME_RATIO_NOTABLE = 1.5
 SCREENER_URL_TEMPLATE = "https://www.screener.in/company/{symbol}/"
 SCREENER_SEARCH_URL = "https://www.screener.in/api/company/search/"
 SCREENER_TIMEOUT_SECONDS = 20
+# Screener starts refusing partway through an unpaced 49-request sweep: the first
+# 20-odd resolve, then even valid symbols (COALINDIA, HCLTECH) return nothing, and
+# the search fallback resolves a URL that also fails. That is throttling, not a
+# missing page. A short pause between companies costs ~40s and recovers them.
+SCREENER_REQUEST_DELAY_SECONDS = 0.8
 # Empty for now: LTIM was mapped to LTIMINDTREE here, but that 404s too — LTIM has no
 # screener page at all, so the miss path (search, then blank cells) is the right answer.
 SCREENER_SYMBOL_OVERRIDES: dict[str, str] = {}
+
+# ──────────────────────────────────────────────
+# Event calendar (NSE corporate actions & results)
+# ──────────────────────────────────────────────
+
+# NSE serves these as plain JSON with no key and no login. They are the same feeds
+# the nseindia.com corporate-filings pages are built from.
+NSE_CORPORATE_ACTIONS_URL = (
+    "https://www.nseindia.com/api/corporates-corporateActions?index=equities"
+)
+NSE_EVENT_CALENDAR_URL = "https://www.nseindia.com/api/event-calendar"
+NSE_HOLIDAY_URL = "https://www.nseindia.com/api/holiday-master?type=trading"
+NSE_REQUEST_TIMEOUT_SECONDS = 30
+
+# How far ahead to report events. A month covers a full results cycle.
+EVENT_LOOKAHEAD_DAYS = 30
+
+# How far BACK to look, which matters more than the forward window. A past ex-date
+# is the one that explains the chart in front of you: NTPC, Coal India and ONGC all
+# went ex-dividend on 2-4 Sep 2026, and the 1% or so each dropped fed straight into
+# their technical scores with nothing in the news to account for it. The default
+# endpoint returns only the next couple of dozen rows market-wide, so the window has
+# to be requested explicitly.
+EVENT_LOOKBACK_DAYS = 20
+
+# Within this many days, an event is flagged rather than merely listed.
+EVENT_IMMINENT_DAYS = 3
 
 # Articles for one company are scored in a single batched request. Summaries are
 # trimmed harder than in the single-article prompt since 8 of them share one call.
@@ -665,10 +697,14 @@ GROQ_MAX_RPM = 5                   # NOT the 30 RPM request cap — the real cei
                                     # At ~480 input + 1,024 reserved output tokens per call,
                                     # 5 calls/min ≈ 7,500 TPM. Setting this to 25 (the old value)
                                     # ran ~3-8x over the token budget and 429-stormed.
-GROQ_MAX_TOKENS = 1024             # gpt-oss is a reasoning model: hidden reasoning tokens
-                                    # still consume this budget even though they never reach
-                                    # the response content, so keep headroom over the ~150
-                                    # tokens the JSON payload itself needs.
+GROQ_MAX_TOKENS = 4096             # Sized for a BATCH, not one article. Each scored article
+                                    # is ~90 tokens of JSON, so 8 of them need ~750 — and
+                                    # gpt-oss is a reasoning model whose hidden reasoning also
+                                    # draws on this budget. At 1024 the array was truncated
+                                    # mid-object ("reasoning": "The article high...), the JSON
+                                    # failed to parse, and 13 of 49 companies fell back to
+                                    # per-article scoring — 8x the calls, which is what
+                                    # exhausted the 200K daily token cap.
 GROQ_TEMPERATURE = 0.1             # Low temp for consistent structured output
 GROQ_REASONING_EFFORT = "low"      # This is a short classification task, not a proof — minimize
                                     # internal reasoning tokens rather than paying for depth we don't use.
@@ -717,6 +753,13 @@ GEMINI_MAX_TOKENS = 1500           # Batch scoring returns one JSON object per a
                                     # so 8 articles need far more room than a single score.
 GEMINI_TEMPERATURE = 0.1
 GEMINI_TIMEOUT_SECONDS = 60
+
+# Gemini answered 7 calls and then returned 429 "exceeded your current quota" 149
+# times in a row — the free-tier daily allowance for this model is spent almost
+# immediately. Every one of those was a wasted round trip before falling through to
+# Groq. After this many consecutive failures, stop calling Gemini for the rest of
+# the run; a provider that has failed 6 times running is not coming back today.
+GEMINI_CONSECUTIVE_FAILURE_LIMIT = 6
 
 
 # ──────────────────────────────────────────────

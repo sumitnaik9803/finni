@@ -26,6 +26,7 @@ from datetime import date
 
 from src.aggregator import Aggregator
 from src.config import COMPANIES, get_company
+from src.events import EventsFetcher
 from src.fundamentals import FundamentalsFetcher
 from src.llm_scorer import LLMScorer
 from src.news_fetcher import NewsFetcher
@@ -138,6 +139,18 @@ async def run_pipeline():
     logger.info(f"💰 Fundamentals retrieved for {len(fundamentals)}/{len(ticker_list)} companies")
 
     # ──────────────────────────────────────────
+    # Step 5c: Upcoming events (NSE corporate actions & results)
+    # ──────────────────────────────────────────
+    logger.info("📅 Fetching upcoming corporate actions and results dates...")
+    events_fetcher = EventsFetcher()
+    events = events_fetcher.fetch_all(ticker_list)
+    next_holiday = events_fetcher.next_trading_holiday()
+    if next_holiday:
+        logger.info(f"📅 Next NSE trading holiday: {next_holiday[0]} ({next_holiday[1]})")
+    for ticker, evts in events.items():
+        logger.info(f"   {ticker}: {'; '.join(e.render() for e in evts)}")
+
+    # ──────────────────────────────────────────
     # Step 6: Generate signals
     # ──────────────────────────────────────────
     logger.info("🎯 Step 6/9: Generating signals...")
@@ -167,7 +180,7 @@ async def run_pipeline():
     logger.info("📝 Step 8/9: Building report...")
     builder = ReportBuilder()
     report = builder.build(
-        analysis, digests, snapshots, patterns, fundamentals,
+        analysis, digests, snapshots, patterns, fundamentals, events,
         pipeline_start_time=start_time,
     )
 

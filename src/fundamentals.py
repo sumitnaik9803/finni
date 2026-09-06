@@ -15,6 +15,7 @@ low-P/E company reads differently from the same read on an expensive one.
 Everything here fails soft: a miss returns None and the pipeline carries on.
 """
 
+import asyncio
 import logging
 import re
 
@@ -23,6 +24,7 @@ from bs4 import BeautifulSoup
 
 from src.telemetry import telemetry
 from src.config import (
+    SCREENER_REQUEST_DELAY_SECONDS,
     SCREENER_SEARCH_URL,
     SCREENER_SYMBOL_OVERRIDES,
     SCREENER_TIMEOUT_SECONDS,
@@ -211,7 +213,9 @@ class FundamentalsFetcher:
         """
         results: dict[str, dict[str, float]] = {}
         async with aiohttp.ClientSession() as session:
-            for ticker in tickers:
+            for i, ticker in enumerate(tickers):
+                if i:
+                    await asyncio.sleep(SCREENER_REQUEST_DELAY_SECONDS)
                 data = await self.fetch(
                     session, ticker, (names or {}).get(ticker)
                 )

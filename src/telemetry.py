@@ -36,6 +36,11 @@ _GROUPS: list[tuple[str, list[tuple[str, str]]]] = [
     ("FUNDAMENTALS", [
         ("screener", "screener.in"),
     ]),
+    ("EVENTS", [
+        ("nse-actions", "NSE corp actions"),
+        ("nse-events", "NSE event cal"),
+        ("nse-holidays", "NSE holidays"),
+    ]),
     ("OUTPUT", [
         ("sheets", "Google Sheets"),
     ]),

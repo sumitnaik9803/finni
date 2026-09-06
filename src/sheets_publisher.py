@@ -35,6 +35,7 @@ class SheetsPublisher:
         "Articles", "Top Event", "Key Reasoning", "Volume Notable",
         "All Headlines",
         "P/E", "ROCE %", "ROE %", "Div Yield %",
+        "Upcoming Events", "Event Alert",
     ]
 
     def __init__(self):

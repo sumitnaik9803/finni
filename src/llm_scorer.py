@@ -37,6 +37,7 @@ from src.config import (
     GROQ_REASONING_EFFORT,
     GROQ_REASONING_FORMAT,
     GROQ_TEMPERATURE,
+    GEMINI_CONSECUTIVE_FAILURE_LIMIT,
     GEMINI_GENERATECONTENT_URL,
     GEMINI_INTERACTIONS_URL,
     GEMINI_MAX_RPM,
@@ -160,6 +161,7 @@ class LLMScorer:
         self._gemini_surface = None      # "interactions" | "generatecontent", once known
         self._gemini_model = None        # Pinned once a model actually answers
         self._gemini_model_queue = None  # Candidate models, resolved once per run
+        self._gemini_consecutive_failures = 0
 
     def _get_groq_client(self):
         """Lazy-init Groq client."""
@@ -318,7 +320,12 @@ class LLMScorer:
                 logger.warning(f"{provider} API call failed: {e}")
                 if provider == "groq":
                     telemetry.fail("groq", self._groq_failure_reason(e))
+                elif provider == "gemini":
+                    self._note_gemini_failure()
                 continue
+
+            if provider == "gemini":
+                self._gemini_consecutive_failures = 0
 
             try:
                 return self._parse_response(response_text, expect_array), provider
@@ -327,6 +334,25 @@ class LLMScorer:
                 telemetry.fail(provider, "unparseable JSON")
 
         return None
+
+    def _note_gemini_failure(self):
+        """
+        Count consecutive Gemini failures and disable it once they pile up.
+
+        A daily quota that is spent stays spent, so continuing to try costs a wasted
+        round trip on every single call for the rest of the run without any chance of
+        succeeding. Any success resets the counter, so a transient blip does not
+        disable the provider.
+        """
+        self._gemini_consecutive_failures += 1
+        if self._gemini_consecutive_failures == GEMINI_CONSECUTIVE_FAILURE_LIMIT:
+            self._gemini_available = False
+            logger.warning(
+                f"Disabling Gemini for this run after "
+                f"{GEMINI_CONSECUTIVE_FAILURE_LIMIT} consecutive failures "
+                f"(quota is spent — every further call would just be a wasted round trip)"
+            )
+            telemetry.note("gemini", "disabled_after", GEMINI_CONSECUTIVE_FAILURE_LIMIT)
 
     @staticmethod
     def _groq_failure_reason(exc: Exception) -> str:

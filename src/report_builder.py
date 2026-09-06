@@ -13,6 +13,7 @@ import os
 from datetime import date, datetime, timedelta, timezone
 
 from src.aggregator import DailyDigest
+from src.events import CompanyEvent, alert, summarize
 from src.config import REPORTS_DIR, TICKER_TO_COMPANY
 from src.pattern_analyzer import SectorPattern
 from src.signal_generator import ComparativeAnalysis, StockSignal
@@ -33,6 +34,7 @@ class ReportBuilder:
         snapshots: dict[str, TechnicalSnapshot],
         patterns: dict[str, SectorPattern],
         fundamentals: dict[str, dict[str, float]] | None = None,
+        events: dict[str, list[CompanyEvent]] | None = None,
         pipeline_start_time: float | None = None,
     ) -> dict:
         """
@@ -62,7 +64,10 @@ class ReportBuilder:
 
         # Build Sheets data
         fundamentals = fundamentals or {}
-        sheets_rows = self._build_sheets_rows(analysis, digests, snapshots, report_date, fundamentals)
+        events = events or {}
+        sheets_rows = self._build_sheets_rows(
+            analysis, digests, snapshots, report_date, fundamentals, events
+        )
         dashboard = self._build_dashboard_data(analysis, digests, snapshots, report_date, timestamp, runtime_str)
 
         return {
@@ -223,6 +228,7 @@ class ReportBuilder:
         snapshots: dict[str, TechnicalSnapshot],
         report_date: str,
         fundamentals: dict[str, dict[str, float]],
+        events: dict[str, list[CompanyEvent]],
     ) -> list[dict]:
         """Build rows for the 'Daily Log' sheet (one row per stock per day)."""
         rows = []
@@ -230,6 +236,7 @@ class ReportBuilder:
             snapshot = snapshots.get(signal.ticker)
             digest = digests.get(signal.ticker)
             fund = fundamentals.get(signal.ticker, {})
+            evts = events.get(signal.ticker, [])
 
             rows.append({
                 "Date": report_date,
@@ -259,6 +266,11 @@ class ReportBuilder:
                 "ROCE %": fund.get("roce", ""),
                 "ROE %": fund.get("roe", ""),
                 "Div Yield %": fund.get("dividend_yield", ""),
+                # Upcoming corporate actions and results dates. The alert matters most
+                # for ex-dates: a split or bonus rebases the price, so a large "drop"
+                # in the technicals on that day is arithmetic, not a sell-off.
+                "Upcoming Events": summarize(evts),
+                "Event Alert": alert(evts),
             })
 
         return rows
