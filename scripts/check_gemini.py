@@ -22,6 +22,18 @@ GENERATECONTENT_URL = (
     "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 )
 
+# Mirrors GEMINI_MODEL_PREFERENCES in src/config.py — kept as a literal so this
+# script stays runnable standalone, without importing the pipeline.
+PREFERENCES = [
+    "gemini-flash-latest",
+    "gemini-3.6-flash",
+    "gemini-3-flash-preview",
+    "gemini-flash-lite-latest",
+    "gemini-3.1-flash-lite-preview",
+    "gemini-2.5-flash-lite",
+    "gemini-2.5-flash",
+]
+
 
 def _request(url: str, key: str, payload: dict | None = None) -> tuple[int, str]:
     data = json.dumps(payload).encode() if payload is not None else None
@@ -54,7 +66,7 @@ def main() -> int:
     # 1. Which models can this key see?
     status, body = _request(MODELS_URL, key)
     print(f"[1] list models        -> HTTP {status}")
-    model = "gemini-2.5-flash"
+    model = PREFERENCES[0]
     if status == 200:
         names = [
             (m.get("name") or "").removeprefix("models/")
@@ -62,8 +74,11 @@ def main() -> int:
         ]
         flash = [n for n in names if "flash" in n and "thinking" not in n]
         print(f"    {len(names)} models visible; flash models: {', '.join(flash[:8]) or 'none'}")
-        if flash:
-            model = flash[0]
+        # Take the first PREFERENCE that is visible rather than the first visible
+        # flash model: the listing happily advertises retired models (gemini-2.5-flash
+        # is listed for accounts that get "no longer available to new users" on it),
+        # so an alphabetical pick tests a dead model and reports a false failure.
+        model = next((m for m in PREFERENCES if m in names), PREFERENCES[0])
     else:
         print(f"    {body[:300]}")
 
