@@ -57,6 +57,11 @@ from src.telemetry import debug_llm_enabled, telemetry
 
 logger = logging.getLogger(__name__)
 
+# Gemini failures that are about the API key rather than the model. Trying a
+# different model with the same key changes nothing, so these abort the whole
+# candidate search instead of advancing through it.
+_ACCOUNT_LEVEL_STATUSES = frozenset({401, 403, 429})
+
 
 @dataclass
 class SentimentResult:
@@ -582,7 +587,22 @@ class LLMScorer:
                                 )
                         break
 
+                    if status in _ACCOUNT_LEVEL_STATUSES:
+                        # Auth and quota are properties of the KEY, not the model, so
+                        # walking the rest of the candidate list cannot help — it just
+                        # repeats the same rejection. Measured at ~8s per scoring call
+                        # against a spent quota (7 models x 2 endpoints), on every
+                        # single call. Give up on Gemini for this prompt immediately.
+                        errors.append(f"{model}/{surface}: {status} {body[:120]}")
+                        telemetry.fail("gemini", f"HTTP {status}")
+                        raise RuntimeError(
+                            f"Gemini rejected the key itself ({status}): {body[:160]}"
+                        )
+
                     if status != 200:
+                        # 5xx and the like are specific to this model ("gemini-flash-latest
+                        # is currently experiencing high demand"), so another candidate
+                        # is worth a try.
                         errors.append(f"{model}/{surface}: {status} {body[:120]}")
                         telemetry.fail("gemini", f"HTTP {status}")
                         continue
