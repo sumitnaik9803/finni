@@ -643,6 +643,86 @@ SCREENER_REQUEST_DELAY_SECONDS = 0.8
 SCREENER_SYMBOL_OVERRIDES: dict[str, str] = {}
 
 # ──────────────────────────────────────────────
+# Tickertape links (one per tracked stock)
+# ──────────────────────────────────────────────
+
+# Tickertape URLs end in ITS OWN security id, not the NSE symbol: JSWSTEEL is
+# JSTL, HCLTECH is HCLT, Tata Steel is TISC. There is no rule to derive one from
+# the other, so every slug below was resolved through Tickertape's search API and
+# then fetched to confirm it returns HTTP 200. Re-run scripts/refresh_tickertape.py
+# if a company is added or a listing changes.
+#
+# LTIM is the one that needed a judgement call: Tickertape's search still indexes
+# only the pre-merger LTI and Mindtree, so LTIMindtree resolves under the legacy
+# L&T Infotech id (LRTI). Confirmed by quote — that id prices at ~4,570, matching
+# LTIM.NS, while the old Mindtree id returns no data at all.
+TICKERTAPE_URL_TEMPLATE = "https://www.tickertape.in{slug}"
+
+TICKERTAPE_SLUGS = {
+    "RELIANCE":    "/stocks/reliance-industries-RELI",
+    "TCS":         "/stocks/tata-consultancy-services-TCS",
+    "HDFCBANK":    "/stocks/hdfc-bank-HDBK",
+    "ICICIBANK":   "/stocks/icici-bank-ICBK",
+    "INFY":        "/stocks/infosys-INFY",
+    "ITC":         "/stocks/itc-ITC",
+    "SBIN":        "/stocks/state-bank-of-india-SBI",
+    "BHARTIARTL":  "/stocks/bharti-airtel-BRTI",
+    "HINDUNILVR":  "/stocks/hindustan-unilever-HLL",
+    "LT":          "/stocks/larsen-and-toubro-LART",
+    "BAJFINANCE":  "/stocks/bajaj-finance-BJFN",
+    "AXISBANK":    "/stocks/axis-bank-AXBK",
+    "KOTAKBANK":   "/stocks/kotak-mahindra-bank-KTKM",
+    "MARUTI":      "/stocks/maruti-suzuki-india-MRTI",
+    "SUNPHARMA":   "/stocks/sun-pharmaceutical-industries-SUN",
+    "ULTRACEMCO":  "/stocks/ultratech-cement-ULTC",
+    "TATAMOTORS":  "/stocks/tata-motors-TAMO",
+    "NTPC":        "/stocks/ntpc-NTPC",
+    "TITAN":       "/stocks/titan-company-TITN",
+    "ONGC":        "/stocks/oil-and-natural-gas-corporation-ONGC",
+    "POWERGRID":   "/stocks/power-grid-corporation-of-india-PGRD",
+    "COALINDIA":   "/stocks/coal-india-COAL",
+    "ASIANPAINT":  "/stocks/asian-paints-ASPN",
+    "BAJAJFINSV":  "/stocks/bajaj-finserv-BJFS",
+    "ADANIENT":    "/stocks/adani-enterprises-ADEL",
+    "ADANIPORTS":  "/stocks/adani-ports-and-special-economic-zone-APSE",
+    "M&M":         "/stocks/mahindra-and-mahindra-MAHM",
+    "WIPRO":       "/stocks/wipro-WIPR",
+    "HCLTECH":     "/stocks/hcl-technologies-HCLT",
+    "TATASTEEL":   "/stocks/tata-steel-TISC",
+    "JSWSTEEL":    "/stocks/jsw-steel-JSTL",
+    "HINDALCO":    "/stocks/hindalco-industries-HALC",
+    "GRASIM":      "/stocks/grasim-industries-GRAS",
+    "TECHM":       "/stocks/tech-mahindra-TEML",
+    "LTIM":        "/stocks/ltimindtree-LRTI",
+    "INDUSINDBK":  "/stocks/indusind-bank-INBK",
+    "BAJAJ-AUTO":  "/stocks/bajaj-auto-BAJA",
+    "EICHERMOT":   "/stocks/eicher-motors-EICH",
+    "HEROMOTOCO":  "/stocks/hero-motocorp-HROM",
+    "DRREDDY":     "/stocks/drreddys-laboratories-REDY",
+    "CIPLA":       "/stocks/cipla-CIPL",
+    "DIVISLAB":    "/stocks/divis-laboratories-DIVI",
+    "APOLLOHOSP":  "/stocks/apollo-hospitals-enterprise-APLH",
+    "BRITANNIA":   "/stocks/britannia-industries-BRIT",
+    "NESTLEIND":   "/stocks/nestle-india-NEST",
+    "TATACONSUM":  "/stocks/tata-consumer-products-TACN",
+    "HDFCLIFE":    "/stocks/hdfc-life-insurance-company-HDFL",
+    "SBILIFE":     "/stocks/sbi-life-insurance-company-SBIL",
+    "BPCL":        "/stocks/bharat-petroleum-corporation-BPCL",
+}
+
+
+def get_tickertape_url(ticker: str) -> str:
+    """
+    The Tickertape page for a ticker, or "" if we have no slug for it.
+
+    Accepts either form of the symbol ("RELIANCE" or "RELIANCE.NS") since the
+    sheet stores the bare one and the pipeline carries the suffixed one.
+    """
+    slug = TICKERTAPE_SLUGS.get(ticker.replace(".NS", "").strip().upper())
+    return TICKERTAPE_URL_TEMPLATE.format(slug=slug) if slug else ""
+
+
+# ──────────────────────────────────────────────
 # Event calendar (NSE corporate actions & results)
 # ──────────────────────────────────────────────
 

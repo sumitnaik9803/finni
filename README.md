@@ -105,7 +105,8 @@ finni/
 │   ├── telemetry.py            # Per-dependency call tally (run summary)
 │   └── main.py                 # Pipeline orchestrator
 ├── scripts/
-│   └── check_gemini.py         # Diagnose a Gemini key against both API surfaces
+│   ├── check_gemini.py         # Diagnose a Gemini key against both API surfaces
+│   └── refresh_tickertape.py   # Re-resolve Tickertape URLs after a listing change
 ├── data/reports/               # Historical daily reports (auto-committed)
 ├── requirements.txt
 ├── setup_guide.md              # Detailed setup instructions
@@ -139,6 +140,7 @@ call tally you need.
 |---|---|
 | Every LLM prompt and raw response | `FINNI_DEBUG_LLM=1` before running |
 | Whether a Gemini key works, and on which endpoint | `python scripts/check_gemini.py $GEMINI_API_KEY` |
+| Whether the Tickertape links still resolve | `python scripts/refresh_tickertape.py` |
 
 ### Gemini API keys
 

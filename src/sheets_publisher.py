@@ -13,7 +13,11 @@ import logging
 
 import gspread
 
-from src.config import get_google_sheet_id, get_google_sheets_credentials
+from src.config import (
+    get_google_sheet_id,
+    get_google_sheets_credentials,
+    get_tickertape_url,
+)
 from src.telemetry import telemetry
 
 logger = logging.getLogger(__name__)
@@ -26,9 +30,14 @@ class SheetsPublisher:
     DAILY_LOG_SHEET = "Daily Log"
     DASHBOARD_SHEET = "Dashboard"
 
+    # The link column sits at D, so adding it to an existing sheet means shifting
+    # every column from D onward one to the right rather than just rewriting row 1.
+    LINK_HEADER = "link"
+    LINK_COLUMN = 4          # 1-based, as gspread counts columns
+
     # Column headers for the Daily Log sheet
     DAILY_LOG_HEADERS = [
-        "Date", "Rank", "Ticker", "Company", "Signal",
+        "Date", "Rank", "Ticker", "link", "Company", "Signal",
         "Blended Score", "Sentiment Score", "Sentiment Label",
         "Technical Score", "Technical Bias",
         "Last Close", "Day Change %", "RSI", "SMA Alignment", "MACD",
@@ -95,6 +104,13 @@ class SheetsPublisher:
 
         # Check if headers exist
         existing = sheet.get_all_values()
+
+        # A sheet written before the link column existed has its data one column to
+        # the left of where the headers now say it should be. Shift it before doing
+        # anything else, or every row from D onward would be silently mislabelled.
+        if existing and self._insert_link_column(sheet, existing):
+            existing = sheet.get_all_values()
+
         if not existing:
             # Write headers first
             sheet.append_row(self.DAILY_LOG_HEADERS, value_input_option="RAW")
@@ -181,6 +197,48 @@ class SheetsPublisher:
         )
 
         logger.info("Dashboard sheet updated")
+
+    def _insert_link_column(self, sheet, existing: list[list[str]]) -> bool:
+        """
+        Add the link column to a sheet that predates it, and backfill history.
+
+        Inserting a column in the MIDDLE of a populated sheet is the only safe way
+        to do this: simply rewriting row 1 would leave every existing data row one
+        column left of its new header, so Company would be read as link, Signal as
+        Company, and so on all the way to the end.
+
+        Idempotent — it returns False and touches nothing once the column is there,
+        so a re-run cannot insert a second one.
+        """
+        header = existing[0]
+        if self.LINK_HEADER in header:
+            return False
+        if not self._is_header_row(header):
+            # No header at all; the caller inserts a full, already-correct one.
+            return False
+
+        row_count = len(existing)
+        sheet.insert_cols([[""] * row_count], col=self.LINK_COLUMN)
+
+        # Backfill from the Ticker already in column C, which the insert did not move.
+        column = [self.LINK_HEADER]
+        filled = 0
+        for row in existing[1:]:
+            ticker = row[2].strip() if len(row) > 2 else ""
+            url = get_tickertape_url(ticker) if ticker else ""
+            filled += bool(url)
+            column.append(url)
+
+        sheet.update(
+            values=[[value] for value in column],
+            range_name=f"D1:D{row_count}",
+            value_input_option="USER_ENTERED",
+        )
+        logger.info(
+            f"Inserted the link column at D and backfilled {filled} of "
+            f"{row_count - 1} existing rows"
+        )
+        return True
 
     @classmethod
     def _is_header_row(cls, row: list[str]) -> bool:

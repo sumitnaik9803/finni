@@ -14,7 +14,7 @@ from datetime import date, datetime, timedelta, timezone
 
 from src.aggregator import DailyDigest
 from src.events import CompanyEvent, alert, summarize
-from src.config import REPORTS_DIR, TICKER_TO_COMPANY
+from src.config import REPORTS_DIR, TICKER_TO_COMPANY, get_tickertape_url
 from src.pattern_analyzer import SectorPattern
 from src.signal_generator import ComparativeAnalysis, StockSignal
 from src.technicals import TechnicalSnapshot
@@ -242,6 +242,9 @@ class ReportBuilder:
                 "Date": report_date,
                 "Rank": rank,
                 "Ticker": signal.ticker.replace(".NS", ""),
+                # Blank rather than a guessed URL when the slug is unknown: a link
+                # that 404s is worse than no link.
+                "link": get_tickertape_url(signal.ticker),
                 "Company": signal.company_name,
                 "Signal": signal.signal_emoji,
                 "Blended Score": signal.blended_score,
