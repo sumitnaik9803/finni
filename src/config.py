@@ -753,6 +753,11 @@ EVENT_IMMINENT_DAYS = 3
 # trimmed harder than in the single-article prompt since 8 of them share one call.
 BATCH_SUMMARY_CHARS = 240
 
+# How long to wait before re-sending a batch that was refused for rate limiting.
+# A 429 means "not this minute", so the wait has to clear the provider's rolling
+# per-minute window — hence just over 60s rather than a token backoff.
+BATCH_RETRY_DELAY_SECONDS = 65
+
 # Provider order: each is tried in turn until one returns parseable JSON.
 #
 # Gemini leads because the binding free-tier constraint here is TOKENS, not requests:
@@ -763,7 +768,13 @@ BATCH_SUMMARY_CHARS = 240
 # — running Groq first produced a sustained 429 storm. Gemini's TPM budget is 125x
 # larger and absorbs the batched workload (49 calls/run) comfortably.
 # Swap the order here to put Groq back in front.
-LLM_PROVIDER_ORDER = ["gemini", "groq"]
+#
+# Cerebras sits LAST deliberately. Groq's 200K tokens/day is ~75% spent by a single run
+# (66 calls x ~2.3K on 2026-09-07), leaving no slack for a retry storm or a re-run. A
+# TAIL provider only wakes once the ones ahead of it are exhausted, so on a normal day
+# it is never called and therefore cannot shift a single score — it is insurance, not a
+# participant. It stays dormant until CEREBRAS_API_KEY is set; no key, no attempt.
+LLM_PROVIDER_ORDER = ["gemini", "groq", "cerebras"]
 
 # Groq (fallback)
 # openai/gpt-oss-120b: current production model (not preview), 131K context, native
@@ -829,8 +840,14 @@ GEMINI_MODEL = "gemini-flash-latest"
 # Free tier (2026): ~10-15 RPM, 250,000 TPM, 250-1,000 requests/day depending on model.
 # Still ~31x Groq's 8,000 TPM, which is why Gemini leads the provider order.
 GEMINI_MAX_RPM = 8
-GEMINI_MAX_TOKENS = 1500           # Batch scoring returns one JSON object per article,
-                                    # so 8 articles need far more room than a single score.
+GEMINI_MAX_TOKENS = 4096           # The GROQ_MAX_TOKENS lesson above, learned twice.
+                                    # gemini-3.6-flash is a THINKING model: its hidden
+                                    # reasoning is drawn from this same budget before a
+                                    # single character of JSON is emitted. At 1500 the
+                                    # batch array came back cut off mid-object
+                                    # ("reasoning": "UltraTech's aggressive entry into
+                                    # wires and cables...) — 5 of the 7 unparseable
+                                    # Gemini responses in the 2026-09-07 run.
 GEMINI_TEMPERATURE = 0.1
 GEMINI_TIMEOUT_SECONDS = 60
 
@@ -840,6 +857,22 @@ GEMINI_TIMEOUT_SECONDS = 60
 # Groq. After this many consecutive failures, stop calling Gemini for the rest of
 # the run; a provider that has failed 6 times running is not coming back today.
 GEMINI_CONSECUTIVE_FAILURE_LIMIT = 6
+
+# Cerebras (last-resort tail provider)
+# OpenAI-compatible chat-completions surface, so it needs no new dependency — plain
+# aiohttp against the same request shape Groq uses. Free tier (2026): ~1M tokens/day
+# and 14,400 requests/day, which is 5x Groq's daily token budget, with an 8,192-token
+# context cap that our ~2.3K batch prompts sit comfortably inside.
+CEREBRAS_URL = "https://api.cerebras.ai/v1/chat/completions"
+CEREBRAS_MODEL = "gpt-oss-120b"    # Deliberately the SAME model family Groq serves, so a
+                                    # score produced here is comparable with one produced
+                                    # there. If Cerebras renames it, this one line is the
+                                    # fix — the model id is printed in the run summary and
+                                    # in every failure message.
+CEREBRAS_MAX_RPM = 20              # Generous vs Groq: the free tier allows 14,400 req/day.
+CEREBRAS_MAX_TOKENS = 4096         # Matches GROQ_MAX_TOKENS for the same batching reason.
+CEREBRAS_TEMPERATURE = 0.1
+CEREBRAS_TIMEOUT_SECONDS = 60
 
 
 # ──────────────────────────────────────────────
@@ -858,6 +891,17 @@ def get_gemini_api_key() -> str:
     if not key:
         raise EnvironmentError("GEMINI_API_KEY environment variable not set")
     return key
+
+
+def get_cerebras_api_key() -> str:
+    """
+    Cerebras is optional, so this returns "" rather than raising.
+
+    It is the tail of LLM_PROVIDER_ORDER: without a key the provider simply reports
+    itself unavailable and is skipped, exactly as if it were not configured. Raising
+    here would turn "no Cerebras key" into a crash for a run that never needed it.
+    """
+    return os.environ.get("CEREBRAS_API_KEY", "")
 
 
 def get_google_sheets_credentials() -> str:

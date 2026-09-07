@@ -28,7 +28,14 @@ from tenacity import (
 )
 
 from src.config import (
+    BATCH_RETRY_DELAY_SECONDS,
     BATCH_SUMMARY_CHARS,
+    CEREBRAS_MAX_RPM,
+    CEREBRAS_MAX_TOKENS,
+    CEREBRAS_MODEL,
+    CEREBRAS_TEMPERATURE,
+    CEREBRAS_TIMEOUT_SECONDS,
+    CEREBRAS_URL,
     CompanyConfig,
     LLM_PROVIDER_ORDER,
     GROQ_MAX_RPM,
@@ -48,6 +55,7 @@ from src.config import (
     GEMINI_TEMPERATURE,
     GEMINI_TIMEOUT_SECONDS,
     GEMINI_USE_INTERACTIONS_API,
+    get_cerebras_api_key,
     get_gemini_api_key,
     get_groq_api_key,
     TICKER_TO_COMPANY,
@@ -161,8 +169,14 @@ class LLMScorer:
         self._gemini_model = None
         self.groq_limiter = RateLimiter(GROQ_MAX_RPM)
         self.gemini_limiter = RateLimiter(GEMINI_MAX_RPM)
+        self.cerebras_limiter = RateLimiter(CEREBRAS_MAX_RPM)
         self._groq_available = True
         self._gemini_available = True
+        # Cerebras is opt-in: no key means the provider is simply absent, not broken.
+        self._cerebras_available = bool(get_cerebras_api_key())
+        # Set by complete_json when the last attempt died on a rate limit rather than
+        # on a bad prompt or a bad response — the two need opposite responses.
+        self._last_rate_limited = False
         self._gemini_surface = None      # "interactions" | "generatecontent", once known
         self._gemini_model = None        # Pinned once a model actually answers
         self._gemini_model_queue = None  # Candidate models, resolved once per run
@@ -209,6 +223,22 @@ class LLMScorer:
 
         prompt = self._build_batch_prompt(articles, company)
         result = await self.complete_json(prompt, expect_array=True)
+
+        if result is None and self._last_rate_limited:
+            # A 429 says "not this minute" — it is not a verdict on the prompt. Falling
+            # straight through to the per-article path answers a rate limit by sending
+            # len(articles) MORE requests, piling demand onto the very limit we just
+            # exceeded. That is what happened to Britannia on 2026-09-07: one refused
+            # batch became 8 calls, ~16K tokens spent to obtain what 1 call would have.
+            # Wait out the provider's rolling window and re-send the same single batch.
+            logger.warning(
+                f"{company.short_name}: rate limited — waiting "
+                f"{BATCH_RETRY_DELAY_SECONDS}s and retrying the batch "
+                f"(rather than fanning out to {len(articles)} calls)"
+            )
+            telemetry.note("groq", "batch_retries_after_429", "yes")
+            await asyncio.sleep(BATCH_RETRY_DELAY_SECONDS)
+            result = await self.complete_json(prompt, expect_array=True)
 
         if result is not None:
             parsed, provider = result
@@ -306,11 +336,17 @@ class LLMScorer:
         Returns None if every provider failed. Shared by article scoring and the
         sector pattern analyzer so both honour the same order and rate limiters.
         """
+        self._last_rate_limited = False
+
         for provider in LLM_PROVIDER_ORDER:
             if provider == "groq":
                 available, limiter, call = self._groq_available, self.groq_limiter, self._call_groq
             elif provider == "gemini":
                 available, limiter, call = self._gemini_available, self.gemini_limiter, self._call_gemini
+            elif provider == "cerebras":
+                available, limiter, call = (
+                    self._cerebras_available, self.cerebras_limiter, self._call_cerebras
+                )
             else:
                 logger.warning(f"Unknown LLM provider in LLM_PROVIDER_ORDER: {provider}")
                 continue
@@ -324,9 +360,15 @@ class LLMScorer:
             except Exception as e:
                 logger.warning(f"{provider} API call failed: {e}")
                 if provider == "groq":
-                    telemetry.fail("groq", self._groq_failure_reason(e))
+                    reason = self._groq_failure_reason(e)
+                    telemetry.fail("groq", reason)
+                    # A per-minute limit is worth waiting out; a per-day one is not.
+                    if reason == "429 rate limited":
+                        self._last_rate_limited = True
                 elif provider == "gemini":
                     self._note_gemini_failure()
+                elif provider == "cerebras":
+                    telemetry.fail("cerebras", self._groq_failure_reason(e))
                 continue
 
             if provider == "gemini":
@@ -455,6 +497,70 @@ class LLMScorer:
         telemetry.note("groq", "model", GROQ_MODEL)
         if debug_llm_enabled():
             logger.info(f"[groq] <-- response: {(text or '')[:400]}")
+        return text
+
+    async def _call_cerebras(self, prompt: str) -> str:
+        """
+        Call Cerebras over its OpenAI-compatible chat-completions endpoint.
+
+        Reached with plain aiohttp rather than an SDK: the request shape is identical
+        to Groq's, so a whole extra dependency would buy nothing. Deliberately sends
+        only fields every OpenAI-compatible server accepts — no reasoning_format, no
+        response_format — because this provider is the last line of defence and a 400
+        over an unsupported parameter would be a self-inflicted outage. Any reasoning
+        preamble the model emits is handled by _parse_response, same as elsewhere.
+        """
+        key = get_cerebras_api_key()
+        if not key:
+            self._cerebras_available = False
+            telemetry.skip("cerebras", "no API key")
+            raise RuntimeError("Cerebras API key not set")
+
+        if debug_llm_enabled():
+            logger.info(f"[cerebras] --> prompt ({len(prompt)} chars): {prompt[:400]}")
+
+        payload = {
+            "model": CEREBRAS_MODEL,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": "You are a financial sentiment analyst. Respond only with valid JSON.",
+                },
+                {"role": "user", "content": prompt},
+            ],
+            "temperature": CEREBRAS_TEMPERATURE,
+            "max_tokens": CEREBRAS_MAX_TOKENS,
+        }
+        timeout = aiohttp.ClientTimeout(total=CEREBRAS_TIMEOUT_SECONDS)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.post(
+                CEREBRAS_URL,
+                headers={
+                    "Authorization": f"Bearer {key}",
+                    "Content-Type": "application/json",
+                },
+                json=payload,
+            ) as resp:
+                body = await resp.text()
+                if resp.status != 200:
+                    # 401/403 mean the key is wrong, and no later call will fix that —
+                    # shut the provider down rather than repeat a rejection 49 times.
+                    if resp.status in (401, 403):
+                        self._cerebras_available = False
+                        logger.warning(
+                            "Disabling Cerebras for this run: the key was rejected "
+                            f"({resp.status})"
+                        )
+                    raise RuntimeError(
+                        f"Cerebras failed ({CEREBRAS_MODEL}: {resp.status} {body[:160]})"
+                    )
+                data = json.loads(body)
+
+        text = data["choices"][0]["message"]["content"]
+        telemetry.ok("cerebras", CEREBRAS_MODEL)
+        telemetry.note("cerebras", "model", CEREBRAS_MODEL)
+        if debug_llm_enabled():
+            logger.info(f"[cerebras] <-- response: {(text or '')[:400]}")
         return text
 
     async def _gemini_visible_models(self, session) -> set[str]:
@@ -679,7 +785,37 @@ class LLMScorer:
 
     @staticmethod
     def _extract_generatecontent_text(data: dict) -> str:
-        return data["candidates"][0]["content"]["parts"][0]["text"]
+        """
+        Join every answer part of the first candidate.
+
+        This used to read parts[0] alone. Gemini 3.x is a thinking model and can split
+        one answer across several parts, flagging the reasoning ones with thought=True,
+        so a single index returns a fragment: the 2026-09-07 run logged responses that
+        began mid-object (`": "BULLISH",` and `-0.5\\nsentiment_label: ...`) and failed
+        to parse for that reason. Concatenating the non-thought parts is what the
+        Interactions extractor below has always done; this brings the two in line.
+        """
+        candidate = data["candidates"][0]
+        parts = candidate.get("content", {}).get("parts") or []
+        text = "".join(
+            p["text"] for p in parts if p.get("text") and not p.get("thought")
+        )
+
+        # A truncated answer is still "successful" HTTP-wise, and the JSON parse error
+        # it causes downstream says nothing about the cause. Name it at the source.
+        if candidate.get("finishReason") == "MAX_TOKENS":
+            logger.warning(
+                f"Gemini hit maxOutputTokens ({GEMINI_MAX_TOKENS}) — the response is "
+                f"truncated and will not parse. Raise GEMINI_MAX_TOKENS."
+            )
+            telemetry.note("gemini", "max_tokens_truncations", "yes")
+
+        if not text:
+            raise ValueError(
+                f"Gemini returned no usable text part "
+                f"(finishReason={candidate.get('finishReason')!r}, {len(parts)} parts)"
+            )
+        return text
 
     @staticmethod
     def _extract_interactions_text(data: dict) -> str:

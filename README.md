@@ -64,7 +64,10 @@ Runs automatically via GitHub Actions:
 See [setup_guide.md](setup_guide.md) for detailed setup instructions:
 
 1. **Fork/clone** this repo
-2. Get **API keys** (Groq, Gemini, Google Sheets) — all free tier
+2. Get **API keys** (Groq, Gemini, Google Sheets) — all free tier.
+   `CEREBRAS_API_KEY` is optional: it adds a third LLM provider at the *end* of the
+   chain, used only once Gemini and Groq are exhausted. Leave it unset and nothing
+   changes.
 3. Add keys as **GitHub Actions secrets**
 4. **Enable** GitHub Actions on your repo
 5. Reports start generating automatically
@@ -75,6 +78,7 @@ See [setup_guide.md](setup_guide.md) for detailed setup instructions:
 # Set environment variables
 export GROQ_API_KEY="your-key"
 export GEMINI_API_KEY="your-key"
+export CEREBRAS_API_KEY="your-key"        # optional, last-resort provider
 export GOOGLE_SHEETS_CREDENTIALS="base64-encoded-json"
 export GOOGLE_SHEET_ID="your-sheet-id"
 
