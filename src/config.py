@@ -769,12 +769,14 @@ BATCH_RETRY_DELAY_SECONDS = 65
 # larger and absorbs the batched workload (49 calls/run) comfortably.
 # Swap the order here to put Groq back in front.
 #
-# Cerebras sits LAST deliberately. Groq's 200K tokens/day is ~75% spent by a single run
-# (66 calls x ~2.3K on 2026-09-07), leaving no slack for a retry storm or a re-run. A
-# TAIL provider only wakes once the ones ahead of it are exhausted, so on a normal day
-# it is never called and therefore cannot shift a single score — it is insurance, not a
-# participant. It stays dormant until CEREBRAS_API_KEY is set; no key, no attempt.
-LLM_PROVIDER_ORDER = ["gemini", "groq", "cerebras"]
+# The third entry sits LAST deliberately. Groq's 200K tokens/day is ~75% spent by a
+# single run (66 calls x ~2.3K on 2026-09-07), leaving no slack for a retry storm or a
+# re-run. A TAIL provider only wakes once the ones ahead of it are exhausted, so on a
+# normal day it is never called and therefore cannot shift a single score — it is
+# insurance, not a participant. It stays dormant until its key is set; no key, no
+# attempt. Names here must exist in OPENAI_COMPATIBLE_PROVIDERS below (or be "gemini"
+# / "groq", which have their own clients).
+LLM_PROVIDER_ORDER = ["gemini", "groq", "mistral"]
 
 # Groq (fallback)
 # openai/gpt-oss-120b: current production model (not preview), 131K context, native
@@ -858,32 +860,58 @@ GEMINI_TIMEOUT_SECONDS = 60
 # the run; a provider that has failed 6 times running is not coming back today.
 GEMINI_CONSECUTIVE_FAILURE_LIMIT = 6
 
-# Cerebras (last-resort tail provider)
-# OpenAI-compatible chat-completions surface, so it needs no new dependency — plain
-# aiohttp against the same request shape Groq uses. Free tier (2026): ~1M tokens/day
-# and 14,400 requests/day, which is 5x Groq's daily token budget, with an 8,192-token
-# context cap that our ~2.3K batch prompts sit comfortably inside.
-CEREBRAS_URL = "https://api.cerebras.ai/v1/chat/completions"
-CEREBRAS_MODEL = "gpt-oss-120b"    # Deliberately the SAME model family Groq serves, so a
-                                    # score produced here is comparable with one produced
-                                    # there. If Cerebras renames it, this one line is the
-                                    # fix — the model id is printed in the run summary and
-                                    # in every failure message.
-CEREBRAS_MAX_RPM = 20              # Generous vs Groq: the free tier allows 14,400 req/day.
-CEREBRAS_MAX_TOKENS = 4096         # Matches GROQ_MAX_TOKENS for the same batching reason.
-CEREBRAS_TEMPERATURE = 0.1
-CEREBRAS_TIMEOUT_SECONDS = 60
-# api.cerebras.ai sits behind Cloudflare, which 403s any request carrying a default
-# client User-Agent — aiohttp's and python-urllib's are both banned signatures. The
-# body is a bare "error code: 1010" (browser signature banned), NOT Cerebras JSON,
-# because the request never reaches Cerebras at all. Proven with a deliberately
-# invalid key: default UA -> 403/1010, browser UA -> 401 "Wrong API Key". Without
-# this header the provider would have failed on the one day it was needed, and the
-# error would have read exactly like a rejected key.
-CEREBRAS_USER_AGENT = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
-)
+# Tail providers
+# ──────────────
+# Every entry here speaks the OpenAI chat-completions dialect, so ONE code path in
+# llm_scorer serves all of them and adding another is an entry in this dict rather
+# than a new method. Only names listed in LLM_PROVIDER_ORDER are ever called; the
+# rest sit here documented and dormant.
+#
+# This started as a single hard-coded Cerebras block and became a registry the same
+# day, because swapping the tail provider turned out to be a routine event rather
+# than a one-off. Keep it that way.
+OPENAI_COMPATIBLE_PROVIDERS: dict[str, dict] = {
+    "mistral": {
+        "url": "https://api.mistral.ai/v1/chat/completions",
+        "models_url": "https://api.mistral.ai/v1/models",
+        # Free "Experiment" tier: ~1B tokens/month, no card. mistral-small is the
+        # right size for this job — scoring a headline is a labelling task, and
+        # large-latest would drain the monthly quota far faster for no gain on it.
+        "model": "mistral-small-latest",
+        "key_env": "MISTRAL_API_KEY",
+        "max_rpm": 20,
+        "max_tokens": 4096,        # Sized for a BATCH — see GROQ_MAX_TOKENS above.
+        "temperature": 0.1,
+        "timeout": 60,
+        # Verified 2026-09-07: api.mistral.ai answers a default client User-Agent
+        # with ordinary JSON, so no browser spoof is needed here.
+        "user_agent": None,
+    },
+    # Present but deliberately NOT in LLM_PROVIDER_ORDER. Verified 2026-09-07 that
+    # this account gets 402 "payment_required" on every inference call even though
+    # /v1/models lists gpt-oss-120b correctly — the free tier does not include
+    # inference. Kept because the entry costs ten lines and re-enabling it is one
+    # word in LLM_PROVIDER_ORDER if credits are ever purchased.
+    "cerebras": {
+        "url": "https://api.cerebras.ai/v1/chat/completions",
+        "models_url": "https://api.cerebras.ai/v1/models",
+        "model": "gpt-oss-120b",
+        "key_env": "CEREBRAS_API_KEY",
+        "max_rpm": 20,
+        "max_tokens": 4096,
+        "temperature": 0.1,
+        "timeout": 60,
+        # api.cerebras.ai sits behind Cloudflare, which 403s any request carrying a
+        # default client User-Agent — aiohttp's and python-urllib's are both banned
+        # signatures. The body is a bare "error code: 1010", NOT Cerebras JSON,
+        # because the request never reaches Cerebras at all. Proven with a
+        # deliberately invalid key: default UA -> 403/1010, browser UA -> 401
+        # "Wrong API Key". Without this header the provider would have failed on the
+        # one day it was needed, reading exactly like a rejected key.
+        "user_agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                       "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"),
+    },
+}
 
 
 # ──────────────────────────────────────────────
@@ -904,15 +932,15 @@ def get_gemini_api_key() -> str:
     return key
 
 
-def get_cerebras_api_key() -> str:
+def get_optional_api_key(env_var: str) -> str:
     """
-    Cerebras is optional, so this returns "" rather than raising.
+    Read a tail provider's key, returning "" when absent rather than raising.
 
-    It is the tail of LLM_PROVIDER_ORDER: without a key the provider simply reports
-    itself unavailable and is skipped, exactly as if it were not configured. Raising
-    here would turn "no Cerebras key" into a crash for a run that never needed it.
+    These providers are opt-in: with no key the provider reports itself unavailable
+    and is skipped, exactly as if it were not configured. Raising here would turn
+    "no Mistral key" into a crash for a run that never needed one.
     """
-    return os.environ.get("CEREBRAS_API_KEY", "")
+    return os.environ.get(env_var, "")
 
 
 def get_google_sheets_credentials() -> str:

@@ -33,8 +33,9 @@ jobs:
         env:
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          # Optional tail provider. An unset secret resolves to an empty string, which
-          # is exactly how Cerebras stays dormant — no key, no attempt, no failure.
+          # Optional tail providers. An unset secret resolves to an empty string,
+          # which is exactly how one stays dormant — no key, no attempt, no failure.
+          MISTRAL_API_KEY: ${{ secrets.MISTRAL_API_KEY }}
           CEREBRAS_API_KEY: ${{ secrets.CEREBRAS_API_KEY }}
           GOOGLE_SHEETS_CREDENTIALS: ${{ secrets.GOOGLE_SHEETS_CREDENTIALS }}
           GOOGLE_SHEET_ID: ${{ secrets.GOOGLE_SHEET_ID }}

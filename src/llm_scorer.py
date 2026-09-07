@@ -11,6 +11,7 @@ Design choices:
 """
 
 import asyncio
+import functools
 import json
 import logging
 import os
@@ -30,14 +31,8 @@ from tenacity import (
 from src.config import (
     BATCH_RETRY_DELAY_SECONDS,
     BATCH_SUMMARY_CHARS,
-    CEREBRAS_MAX_RPM,
-    CEREBRAS_MAX_TOKENS,
-    CEREBRAS_MODEL,
-    CEREBRAS_TEMPERATURE,
-    CEREBRAS_TIMEOUT_SECONDS,
-    CEREBRAS_URL,
-    CEREBRAS_USER_AGENT,
     CompanyConfig,
+    OPENAI_COMPATIBLE_PROVIDERS,
     LLM_PROVIDER_ORDER,
     GROQ_MAX_RPM,
     GROQ_MAX_TOKENS,
@@ -56,9 +51,9 @@ from src.config import (
     GEMINI_TEMPERATURE,
     GEMINI_TIMEOUT_SECONDS,
     GEMINI_USE_INTERACTIONS_API,
-    get_cerebras_api_key,
     get_gemini_api_key,
     get_groq_api_key,
+    get_optional_api_key,
     TICKER_TO_COMPANY,
 )
 from src.news_fetcher import NewsArticle
@@ -170,11 +165,19 @@ class LLMScorer:
         self._gemini_model = None
         self.groq_limiter = RateLimiter(GROQ_MAX_RPM)
         self.gemini_limiter = RateLimiter(GEMINI_MAX_RPM)
-        self.cerebras_limiter = RateLimiter(CEREBRAS_MAX_RPM)
         self._groq_available = True
         self._gemini_available = True
-        # Cerebras is opt-in: no key means the provider is simply absent, not broken.
-        self._cerebras_available = bool(get_cerebras_api_key())
+        # Tail providers are opt-in: no key means the provider is simply absent, not
+        # broken. Built for every registered provider, not only the ones currently in
+        # LLM_PROVIDER_ORDER, so re-enabling one needs no change here.
+        self._oai_limiters = {
+            name: RateLimiter(spec["max_rpm"])
+            for name, spec in OPENAI_COMPATIBLE_PROVIDERS.items()
+        }
+        self._oai_available = {
+            name: bool(get_optional_api_key(spec["key_env"]))
+            for name, spec in OPENAI_COMPATIBLE_PROVIDERS.items()
+        }
         # Set by complete_json when the last attempt died on a rate limit rather than
         # on a bad prompt or a bad response — the two need opposite responses.
         self._last_rate_limited = False
@@ -344,10 +347,10 @@ class LLMScorer:
                 available, limiter, call = self._groq_available, self.groq_limiter, self._call_groq
             elif provider == "gemini":
                 available, limiter, call = self._gemini_available, self.gemini_limiter, self._call_gemini
-            elif provider == "cerebras":
-                available, limiter, call = (
-                    self._cerebras_available, self.cerebras_limiter, self._call_cerebras
-                )
+            elif provider in OPENAI_COMPATIBLE_PROVIDERS:
+                available = self._oai_available[provider]
+                limiter = self._oai_limiters[provider]
+                call = functools.partial(self._call_openai_compatible, provider)
             else:
                 logger.warning(f"Unknown LLM provider in LLM_PROVIDER_ORDER: {provider}")
                 continue
@@ -368,8 +371,8 @@ class LLMScorer:
                         self._last_rate_limited = True
                 elif provider == "gemini":
                     self._note_gemini_failure()
-                elif provider == "cerebras":
-                    telemetry.fail("cerebras", self._groq_failure_reason(e))
+                elif provider in OPENAI_COMPATIBLE_PROVIDERS:
+                    telemetry.fail(provider, self._groq_failure_reason(e))
                 continue
 
             if provider == "gemini":
@@ -500,28 +503,41 @@ class LLMScorer:
             logger.info(f"[groq] <-- response: {(text or '')[:400]}")
         return text
 
-    async def _call_cerebras(self, prompt: str) -> str:
+    async def _call_openai_compatible(self, provider: str, prompt: str) -> str:
         """
-        Call Cerebras over its OpenAI-compatible chat-completions endpoint.
+        Call any provider in OPENAI_COMPATIBLE_PROVIDERS by name.
 
         Reached with plain aiohttp rather than an SDK: the request shape is identical
-        to Groq's, so a whole extra dependency would buy nothing. Deliberately sends
-        only fields every OpenAI-compatible server accepts — no reasoning_format, no
-        response_format — because this provider is the last line of defence and a 400
-        over an unsupported parameter would be a self-inflicted outage. Any reasoning
-        preamble the model emits is handled by _parse_response, same as elsewhere.
+        across these services, so a dependency per provider would buy nothing.
+        Deliberately sends only fields EVERY OpenAI-compatible server accepts — no
+        reasoning_format, no response_format — because these sit last in the chain and
+        a 400 over an unsupported parameter would be a self-inflicted outage on the one
+        day they matter. Any reasoning preamble a model emits is handled by
+        _parse_response, same as elsewhere.
         """
-        key = get_cerebras_api_key()
+        spec = OPENAI_COMPATIBLE_PROVIDERS[provider]
+        model = spec["model"]
+
+        key = get_optional_api_key(spec["key_env"])
         if not key:
-            self._cerebras_available = False
-            telemetry.skip("cerebras", "no API key")
-            raise RuntimeError("Cerebras API key not set")
+            self._oai_available[provider] = False
+            telemetry.skip(provider, "no API key")
+            raise RuntimeError(f"{provider} API key not set ({spec['key_env']})")
 
         if debug_llm_enabled():
-            logger.info(f"[cerebras] --> prompt ({len(prompt)} chars): {prompt[:400]}")
+            logger.info(f"[{provider}] --> prompt ({len(prompt)} chars): {prompt[:400]}")
+
+        headers = {
+            "Authorization": f"Bearer {key}",
+            "Content-Type": "application/json",
+        }
+        # Only some hosts need this. Cerebras sits behind Cloudflare and 403s a default
+        # client UA before the request ever reaches the API; Mistral does not care.
+        if spec.get("user_agent"):
+            headers["User-Agent"] = spec["user_agent"]
 
         payload = {
-            "model": CEREBRAS_MODEL,
+            "model": model,
             "messages": [
                 {
                     "role": "system",
@@ -529,22 +545,12 @@ class LLMScorer:
                 },
                 {"role": "user", "content": prompt},
             ],
-            "temperature": CEREBRAS_TEMPERATURE,
-            "max_tokens": CEREBRAS_MAX_TOKENS,
+            "temperature": spec["temperature"],
+            "max_tokens": spec["max_tokens"],
         }
-        timeout = aiohttp.ClientTimeout(total=CEREBRAS_TIMEOUT_SECONDS)
+        timeout = aiohttp.ClientTimeout(total=spec["timeout"])
         async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.post(
-                CEREBRAS_URL,
-                headers={
-                    "Authorization": f"Bearer {key}",
-                    "Content-Type": "application/json",
-                    # Not cosmetic — Cloudflare 403s aiohttp's default UA outright.
-                    # See CEREBRAS_USER_AGENT in config.py.
-                    "User-Agent": CEREBRAS_USER_AGENT,
-                },
-                json=payload,
-            ) as resp:
+            async with session.post(spec["url"], headers=headers, json=payload) as resp:
                 body = await resp.text()
                 if resp.status != 200:
                     # 401/403 mean the key is wrong and 402 means the account has no
@@ -552,23 +558,23 @@ class LLMScorer:
                     # later call in this run can succeed — shut the provider down
                     # rather than repeat the same rejection once per company.
                     if resp.status in (401, 402, 403):
-                        self._cerebras_available = False
+                        self._oai_available[provider] = False
                         reason = ("the account has no inference quota"
                                   if resp.status == 402 else "the key was rejected")
                         logger.warning(
-                            f"Disabling Cerebras for this run: {reason} ({resp.status})"
+                            f"Disabling {provider} for this run: {reason} ({resp.status})"
                         )
-                        telemetry.note("cerebras", "disabled", str(resp.status))
+                        telemetry.note(provider, "disabled", str(resp.status))
                     raise RuntimeError(
-                        f"Cerebras failed ({CEREBRAS_MODEL}: {resp.status} {body[:160]})"
+                        f"{provider} failed ({model}: {resp.status} {body[:160]})"
                     )
                 data = json.loads(body)
 
         text = data["choices"][0]["message"]["content"]
-        telemetry.ok("cerebras", CEREBRAS_MODEL)
-        telemetry.note("cerebras", "model", CEREBRAS_MODEL)
+        telemetry.ok(provider, model)
+        telemetry.note(provider, "model", model)
         if debug_llm_enabled():
-            logger.info(f"[cerebras] <-- response: {(text or '')[:400]}")
+            logger.info(f"[{provider}] <-- response: {(text or '')[:400]}")
         return text
 
     async def _gemini_visible_models(self, session) -> set[str]:

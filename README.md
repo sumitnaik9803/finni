@@ -65,9 +65,10 @@ See [setup_guide.md](setup_guide.md) for detailed setup instructions:
 
 1. **Fork/clone** this repo
 2. Get **API keys** (Groq, Gemini, Google Sheets) — all free tier.
-   `CEREBRAS_API_KEY` is optional: it adds a third LLM provider at the *end* of the
+   `MISTRAL_API_KEY` is optional: it adds a third LLM provider at the *end* of the
    chain, used only once Gemini and Groq are exhausted. Leave it unset and nothing
-   changes.
+   changes. Verify one with `python scripts/check_provider.py mistral` — a normal
+   run never reaches a tail provider, so it is the only way to know it works.
 3. Add keys as **GitHub Actions secrets**
 4. **Enable** GitHub Actions on your repo
 5. Reports start generating automatically
@@ -78,7 +79,7 @@ See [setup_guide.md](setup_guide.md) for detailed setup instructions:
 # Set environment variables
 export GROQ_API_KEY="your-key"
 export GEMINI_API_KEY="your-key"
-export CEREBRAS_API_KEY="your-key"        # optional, last-resort provider
+export MISTRAL_API_KEY="your-key"         # optional, last-resort provider
 export GOOGLE_SHEETS_CREDENTIALS="base64-encoded-json"
 export GOOGLE_SHEET_ID="your-sheet-id"
 
@@ -110,6 +111,7 @@ finni/
 │   └── main.py                 # Pipeline orchestrator
 ├── scripts/
 │   ├── check_gemini.py         # Diagnose a Gemini key against both API surfaces
+│   ├── check_provider.py       # Diagnose a tail LLM provider (key, model, fallback)
 │   └── refresh_tickertape.py   # Re-resolve Tickertape URLs after a listing change
 ├── data/reports/               # Historical daily reports (auto-committed)
 ├── requirements.txt
@@ -144,6 +146,7 @@ call tally you need.
 |---|---|
 | Every LLM prompt and raw response | `FINNI_DEBUG_LLM=1` before running |
 | Whether a Gemini key works, and on which endpoint | `python scripts/check_gemini.py $GEMINI_API_KEY` |
+| Whether a tail provider works (a normal run never calls one) | `python scripts/check_provider.py mistral` |
 | Whether the Tickertape links still resolve | `python scripts/refresh_tickertape.py` |
 
 ### Gemini API keys

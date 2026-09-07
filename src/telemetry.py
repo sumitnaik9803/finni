@@ -26,6 +26,7 @@ _GROUPS: list[tuple[str, list[tuple[str, str]]]] = [
     ("LLM", [
         ("gemini", "Gemini"),
         ("groq", "Groq"),
+        ("mistral", "Mistral"),
         ("cerebras", "Cerebras"),
         ("batch", "Batch scoring"),
     ]),
