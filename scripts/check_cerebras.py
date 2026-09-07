@@ -29,6 +29,7 @@ from src.config import (  # noqa: E402
     CEREBRAS_MAX_TOKENS,
     CEREBRAS_MODEL,
     CEREBRAS_URL,
+    CEREBRAS_USER_AGENT,
     LLM_PROVIDER_ORDER,
 )
 from src.llm_scorer import LLMScorer  # noqa: E402
@@ -45,7 +46,12 @@ PROMPT = (
 
 
 def _get(url: str, key: str) -> tuple[int, str]:
-    req = urllib.request.Request(url, headers={"Authorization": f"Bearer {key}"})
+    req = urllib.request.Request(url, headers={
+        "Authorization": f"Bearer {key}",
+        # Cloudflare bans python-urllib's default UA before Cerebras ever sees the
+        # request. Same header the pipeline sends — see CEREBRAS_USER_AGENT.
+        "User-Agent": CEREBRAS_USER_AGENT,
+    })
     try:
         with urllib.request.urlopen(req, timeout=45) as r:
             return r.status, r.read().decode("utf-8", "replace")
@@ -82,9 +88,17 @@ def main() -> int:
             print(f"      {m}{mark}")
     else:
         print(f"    {body[:400]}")
+        if "1010" in body or "error code:" in body:
+            # A bare Cloudflare string, not Cerebras JSON — the request was blocked
+            # before it reached the API, so this says nothing about the key.
+            print("\n    That is Cloudflare, not Cerebras: error 1010 means the "
+                  "request's User-Agent was banned, so it never reached the API. "
+                  "Your key has NOT been tested. Check CEREBRAS_USER_AGENT is being "
+                  "sent on this request.")
+            return 1
         if status in (401, 403):
-            print("\n    The key was rejected. Check it was copied whole, and that the "
-                  "account is on a tier with API access.")
+            print("\n    The key was rejected by Cerebras itself. Check it was copied "
+                  "whole, and that the account is on a tier with API access.")
             return 1
 
     if available and CEREBRAS_MODEL not in available:

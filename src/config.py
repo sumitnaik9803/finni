@@ -873,6 +873,17 @@ CEREBRAS_MAX_RPM = 20              # Generous vs Groq: the free tier allows 14,4
 CEREBRAS_MAX_TOKENS = 4096         # Matches GROQ_MAX_TOKENS for the same batching reason.
 CEREBRAS_TEMPERATURE = 0.1
 CEREBRAS_TIMEOUT_SECONDS = 60
+# api.cerebras.ai sits behind Cloudflare, which 403s any request carrying a default
+# client User-Agent — aiohttp's and python-urllib's are both banned signatures. The
+# body is a bare "error code: 1010" (browser signature banned), NOT Cerebras JSON,
+# because the request never reaches Cerebras at all. Proven with a deliberately
+# invalid key: default UA -> 403/1010, browser UA -> 401 "Wrong API Key". Without
+# this header the provider would have failed on the one day it was needed, and the
+# error would have read exactly like a rejected key.
+CEREBRAS_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+)
 
 
 # ──────────────────────────────────────────────

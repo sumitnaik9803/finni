@@ -36,6 +36,7 @@ from src.config import (
     CEREBRAS_TEMPERATURE,
     CEREBRAS_TIMEOUT_SECONDS,
     CEREBRAS_URL,
+    CEREBRAS_USER_AGENT,
     CompanyConfig,
     LLM_PROVIDER_ORDER,
     GROQ_MAX_RPM,
@@ -538,19 +539,26 @@ class LLMScorer:
                 headers={
                     "Authorization": f"Bearer {key}",
                     "Content-Type": "application/json",
+                    # Not cosmetic — Cloudflare 403s aiohttp's default UA outright.
+                    # See CEREBRAS_USER_AGENT in config.py.
+                    "User-Agent": CEREBRAS_USER_AGENT,
                 },
                 json=payload,
             ) as resp:
                 body = await resp.text()
                 if resp.status != 200:
-                    # 401/403 mean the key is wrong, and no later call will fix that —
-                    # shut the provider down rather than repeat a rejection 49 times.
-                    if resp.status in (401, 403):
+                    # 401/403 mean the key is wrong and 402 means the account has no
+                    # inference quota. All three are properties of the ACCOUNT, so no
+                    # later call in this run can succeed — shut the provider down
+                    # rather than repeat the same rejection once per company.
+                    if resp.status in (401, 402, 403):
                         self._cerebras_available = False
+                        reason = ("the account has no inference quota"
+                                  if resp.status == 402 else "the key was rejected")
                         logger.warning(
-                            "Disabling Cerebras for this run: the key was rejected "
-                            f"({resp.status})"
+                            f"Disabling Cerebras for this run: {reason} ({resp.status})"
                         )
+                        telemetry.note("cerebras", "disabled", str(resp.status))
                     raise RuntimeError(
                         f"Cerebras failed ({CEREBRAS_MODEL}: {resp.status} {body[:160]})"
                     )
